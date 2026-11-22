@@ -196,9 +196,11 @@ Setup:
 3. For https with a self-signed certificate, mount the certificate and set
    **Unraid API CA bundle** to its path. TLS verification is never turned off.
 
-**The key's permissions are the boundary**, enforced by Unraid. Everything in
-this container runs as root, so Claude can read the key and could call the API
-with it directly; a read-only key makes that harmless. Over plain http the key
+**The key's permissions are the boundary**, enforced by Unraid. The key is
+not in Claude's environment or in any MCP config: it sits in a root-owned file
+(`/run/claude-unraid/.env`, mode 0640) that the MCP server reads. Claude's
+user can read that file too, so Claude could call the API with the key
+directly; a read-only key makes that harmless. Over plain http the key
 crosses your LAN unencrypted.
 
 To widen access, give the key more permissions and list more actions in
@@ -258,7 +260,7 @@ output of each check on Unraid's own tools.
 | `/host/boot` | **read-only** | View Unraid config, plugins, templates. The flash drive is read-only for Claude in the container by the mount, and for `host …` commands because they run with `/boot` remounted read-only in their own mount namespace: an ordinary write fails with "Read-only file system", whatever the command. Host commands still run as root, so one that remounts or re-enters namespaces, or hands the write to a host daemon (cron, `at`, `emcmd`, SMB, the web API) or to another container that already mounts `/boot`, gets around it; the guard asks before the common forms (cron/`at`, `emcmd`, `curl`, `smbclient`), not before `docker exec` into such a container |
 | `/host/boot` (rw) | opt-in | Modify config, install plugins, edit templates; commands that touch the flash drive should ask you first, with a reason (text match, so not every spelling) |
 | `/appdata` | not mounted | Inspect other containers' configs and logs |
-| Any share | not mounted | Add it with *Add another Path* in the template (any container path outside `/root`, read-only unless Claude should change files). Claude knows which shares exist and tells you how to add one when it matters |
+| Any share | not mounted | Add it with *Add another Path* in the template (any container path outside `/home/claude`, read-only unless Claude should change files). Claude knows which shares exist and tells you how to add one when it matters |
 | Host networking | off (bridge) | Only needed if something must reach this container directly; outbound SSH to VMs and LAN hosts works in bridge mode |
 
 Every bind mount you add shows up in Claude's `CLAUDE.md` with its access mode after the next start.
@@ -267,21 +269,33 @@ Every bind mount you add shows up in Claude's `CLAUDE.md` with its access mode a
 
 Three independent layers, in order of how much you should rely on them:
 
-1. **Permission prompts** (interactive) — the shipped `settings.json` starts
-   every session in Manual mode (`defaultMode: default`), so Claude Code asks
-   before shell commands and file writes. This matters because Claude Code
-   itself now starts in auto mode by default, where a classifier approves
-   actions instead of you; on a root-equivalent container that is your call,
-   not a default, so it is one Shift+Tab away rather than on. A small allow
-   list lets read-only commands (`docker ps`, `docker logs`,
-   `host zpool status`, …) run without a prompt so the prompts you do see are
-   the ones that matter. `--dangerously-skip-permissions` is disabled
-   (`disableBypassPermissionsMode`).
+1. **Permission prompts**, fixed by managed settings. Claude runs as an
+   unprivileged user (`claude`, uid 99), and its policy lives in
+   `/etc/claude-code/managed-settings.json`. That file is root-owned and has
+   the highest precedence: nothing in Claude's own settings overrides it, and
+   Claude's user cannot change it.
+   - Every session starts in Manual mode (`defaultMode: default`), so Claude
+     Code asks before shell commands and file writes.
+   - Auto mode is off (`disableAutoMode`): it is not in the `Shift+Tab` cycle,
+     so a classifier never approves actions in your place, not even by
+     accident or after a restart.
+   - Bypass mode is off (`disableBypassPermissionsMode`), so
+     `--dangerously-skip-permissions` is refused.
+   - Only managed permission rules count (`allowManagedPermissionRulesOnly`).
+     Claude cannot widen its own permissions by writing an allow rule, and the
+     prompt offers no "always allow". A small allow list lets read-only
+     commands (`docker ps`, `logs`, `host zpool status`, the Unraid API tools)
+     run without a prompt. Raw `docker logs` and `docker inspect` prompt:
+     `logs` strips hidden text, and `inspect` shows passwords.
+   - Only managed hooks run (`allowManagedHooksOnly`), so the guard below
+     cannot be switched off, and no other hook can approve commands silently.
 
 2. **Guard hook** (hard block for a short list) — `claude-guard` is a
    `PreToolUse` hook that inspects the *entire* command string before it runs
    and blocks `mkfs`, `wipefs`, `shred`, writing to a block device (`dd`,
-   `cp`, `tee`, `>` redirection), `sgdisk --zap`, `zpool destroy`/`labelclear`,
+   `cp`, `tee`, `>` redirection), `sgdisk --zap`, `zpool destroy`/`labelclear`, stopping, clearing or
+   re-importing the array (`mdcmd stop|clear|import`, `emcmd cmdStop`,
+   `cmdFormat`, `cmdNewConfig`, …),
    and `rm` on `/`, `/mnt/*`, `/mnt/*/appdata`, `/boot`, `/host/boot` or
    `/appdata`. Because it sees the whole string, wrapping the command in
    `host …`, `sh -c '…'` or `docker run … nsenter …`, using absolute paths,
@@ -299,10 +313,9 @@ Three independent layers, in order of how much you should rely on them:
    refuses writes and the guard has nothing to add), remounts and namespace
    changes, service restarts, cron/`at` entries and `emcmd` made through
    `host` (all would run outside the read-only view), `docker rm`/`prune`,
-   `zfs destroy`/`rollback`. In Manual mode you would
-   have been asked anyway; the gain is the `claude-guard:` line telling you
-   why to look twice. In auto mode it takes these commands away from the
-   classifier and back to you. The guard matches text: a command built from
+   `zfs destroy`/`rollback`. You would have been
+   asked anyway; the gain is the `claude-guard:` line telling you why to look
+   twice. The guard matches text: a command built from
    shell variables, written to a script first, or obfuscated beyond simple
    quoting is outside its reach. It catches mistakes, not a determined
    bypass.
@@ -313,20 +326,15 @@ Three independent layers, in order of how much you should rely on them:
    language model, this holds most of the time, not all of the time; that is
    why it is the layer to rely on least.
 
-All of this lives in `~/.claude/settings.json` inside the persisted home
-directory and can be edited. It protects against mistakes, not against a
-determined adversary with socket access. The file is seeded on first start.
-When an update ships new settings, they are merged in once underneath your
-own keys (a `settings.json.bak` is kept); your values always win. New shipped
-deny entries are added to your deny list; your allow list is left exactly as
-you set it, and the start log names shipped read-only entries it lacks. To
-turn a shipped setting off, set it to the value you want rather than deleting
-the line, otherwise a later update puts the shipped default back.
+To change the policy (for example to allow one more command without a
+prompt), you change the image's `managed-settings.json` and rebuild, or mount
+your own file over `/etc/claude-code/managed-settings.json` (read-only, owned
+by root on the host). Claude cannot do it for you, which is the point.
 
-Switching to auto mode with `Shift+Tab` sticks to that conversation: because
-the container resumes the last conversation on start, it comes back in auto
-mode after a restart until you switch back or start a fresh conversation
-(`/clear`).
+What this does not cover: Claude's user can still read what it is given, for
+example the Unraid API key file and the host-check SSH key. Both only grant
+read access (the key's permissions and the host's forced command decide), so
+that is acceptable, but it is why they are kept read-only.
 
 ### Prompt injection
 
@@ -438,10 +446,16 @@ The `## Custom` section at the bottom of the generated `CLAUDE.md` is yours. Add
 
 ### A note on appdata
 
-`/root` holds Claude's login, settings and conversation history, which means
-many small writes. The default path is on `/mnt/user/appdata` and works, but a
+`/home/claude` holds Claude's login, settings and conversation history, which
+means many small writes. Its files belong to uid 99 / gid 100, like other
+Unraid appdata. The default path is on `/mnt/user/appdata` and works, but a
 cache-only (exclusive) appdata share avoids the FUSE overhead of user shares
 and is the usual recommendation on Unraid.
+
+If your Docker appdata path (Settings → Docker) is not on the `appdata` share,
+change both template paths to it before applying: pointing at a `/mnt/user/<x>`
+that does not exist makes Unraid create a new share `<x>`. The start log
+warns when the data path and Docker's appdata path are on different shares.
 
 ## Disclaimer
 
@@ -485,7 +499,7 @@ sed 's#<Repository>.*</Repository>#<Repository>claude-unraid-manager:local</Repo
 
 # Scanner and guard tests run without Docker or Unraid:
 bash tests/run.sh
-shellcheck -s bash entrypoint.sh generate-claude-md.sh host claude-guard claude-session claude-settings-merge tests/run.sh
+shellcheck -s bash entrypoint.sh generate-claude-md.sh host host-readonly host-readonly-setup claude-guard claude-session unraid-mcp-config tests/*.sh
 ```
 
 ## License

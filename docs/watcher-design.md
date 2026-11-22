@@ -74,7 +74,7 @@ Incident handling: fingerprint (collector + subject), dedupe, cooldown,
 auto-resolve message when it clears, quiet hours, one daily digest.
 
 **Triage run** on a new incident: `claude -p` with a dedicated settings file
-that allows only the read-only commands already in `settings.json` (plus the
+that allows only the read-only commands already in `managed-settings.json` (plus the
 `logs` wrapper), denies `Write`, `Edit`, `WebFetch`, `WebSearch`, and runs with
 `--max-turns` and a token budget. It returns a short diagnosis and, optionally,
 a suggested action **from the catalog below by ID**, never a free-form command.

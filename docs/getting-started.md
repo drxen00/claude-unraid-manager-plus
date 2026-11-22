@@ -123,12 +123,8 @@ On the very first start Claude Code shows its setup:
 4. The browser shows a **code**. Paste it into the terminal where it says
    *Paste code here if prompted*, then `Enter`.
 5. `Login successful` → `Enter`.
-6. If Claude Code asks whether to make **auto mode** its default, say no:
-   this container is set up to ask you before it acts (Manual mode), and auto
-   mode stays one `Shift+Tab` away if you ever want it for a session. Note
-   that a conversation switched to auto mode comes back in auto mode after a
-   container restart, since the last conversation is resumed; switch back or
-   start a fresh one with `/clear`.
+6. Auto mode is switched off in this container, so Claude Code will not
+   offer it: every session asks you before it acts (Manual mode).
 
 The login is stored in the **Data** folder and survives restarts and image
 updates. You will not be asked again.
@@ -144,10 +140,10 @@ containers, VMs and plugins. Good first prompts:
 
 Read-only commands (`docker ps`, `logs <container>`, `host zpool status`,
 ...) run without asking. Anything else shows a **permission prompt** first: the exact
-command, and the choice to allow once, allow always, or deny. That prompt is
+command, and the choice to allow once or deny (there is no "allow always":
+the permission rules are fixed by the image, not by what you click). That prompt is
 your main safety control. Read it. The footer of the screen shows the current
-mode; it should say *manual*. `Shift+Tab` cycles modes, and *auto mode* hands
-those decisions to a classifier instead of you.
+mode; it should say *manual*. Auto mode and bypass mode are not available.
 
 A few commands (formatting disks, `rm -rf` on a share root, writing to a block
 device) are blocked by a guard hook even if you say yes; if you really want one
@@ -173,7 +169,7 @@ that: Docker tab → container → **Edit**:
   your path) read-only, so Claude can inspect other containers' configs.
 - **Any share** → *Add another Path* at the bottom of the edit page: Host path
   `/mnt/user/<share>`, Container path `/<share>` (any name you like, outside
-  `/root`), Access Mode read-only unless Claude should change files. The template's "Example:
+  `/home/claude`), Access Mode read-only unless Claude should change files. The template's "Example:
   a share for Claude" entry is the same thing with `/media` pre-filled as the
   container path. You do not have to plan this ahead: Claude sees the names of
   all your shares and will tell you these steps when a question needs one of
@@ -203,10 +199,8 @@ Code says so in the terminal shortly after start.
 
 - **Update:** Docker tab → container → **Force Update** when a new image is
   out. Your login, settings and history live in the Data folder and are kept.
-  If the new image brings new default settings, they are merged in underneath
-  yours (your values win; new deny entries are added; your allow list is left
-  as it is, and the start log names shipped entries it lacks); a
-  `settings.json.bak` is left next to the file.
+  The permission policy comes with the image (managed settings), so an update
+  brings the new policy with it; there is nothing to merge.
 - **Stop/Start:** as any container. `CLAUDE.md` is rebuilt on every start; the
   last conversation is resumed.
 - **Remove:** remove the container, then delete the two appdata folders. The
