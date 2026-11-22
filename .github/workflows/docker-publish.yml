@@ -18,7 +18,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: shellcheck
-        run: shellcheck -s bash entrypoint.sh generate-claude-md.sh host boot-mode docker-mode logs claude-guard claude-session claude-settings-merge bashrc tests/run.sh tests/proxy-acceptance.sh
+        run: shellcheck -s bash entrypoint.sh generate-claude-md.sh host boot-mode docker-mode logs claude-guard claude-session claude-settings-merge unraid-mcp-config bashrc tests/run.sh tests/proxy-acceptance.sh tests/mcp-allowlist.sh
 
       - name: Scanner and guard tests
         run: bash tests/run.sh
@@ -86,6 +86,11 @@ jobs:
       # this runner's Docker daemon: allowed calls work, everything else is refused.
       - name: Socket proxy acceptance
         run: bash tests/proxy-acceptance.sh claude-unraid-manager:smoke
+
+      # runraid from the image, configured as unraid-mcp-config writes it: only
+      # the shipped read-only actions are exposed, write actions are refused.
+      - name: Unraid MCP allowlist
+        run: bash tests/mcp-allowlist.sh claude-unraid-manager:smoke
 
       # Unraid runs on x86-64 only, so a single platform is built.
       - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
