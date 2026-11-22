@@ -140,7 +140,9 @@ list_containers() {
           if (keep) for (i = 1; i <= NF; i++) if ($i ~ /Label|Total devices/) print $i
         }')
       ARRAY_STATE=$(get ARRAY_STATE)
+      ARRAY_DISKS=$(lines ARRAY_DISKS)
       POOLS=$(csv POOLS)
+      POOL_USAGE=$(lines POOL_USAGE)
 
       if [ -n "$ZFS_POOLS" ]; then
         echo "**ZFS pools:**"
@@ -166,7 +168,9 @@ list_containers() {
         echo ""
       fi
 
-      if [ -n "$BTRFS" ]; then
+      # host-readonly 2 and later describe each pool below (type, devices,
+      # usage); the raw btrfs list is only kept for older host scripts.
+      if [ -n "$BTRFS" ] && [ -z "$POOL_USAGE" ]; then
         echo "**btrfs volumes:**"
         echo ""
         echo "$BTRFS" | awk '{print "  " $0}'
@@ -175,10 +179,49 @@ list_containers() {
         echo ""
       fi
 
-      ARRAY_MDSTATE=$(printf '%s' "$ARRAY_STATE" | grep -oP '(?<=mdState=)\w+' || true)
-      ARRAY_DISKS=$(printf '%s' "$ARRAY_STATE" | grep -oP '(?<=mdNumDisks=)\d+' || true)
-      if [ -n "$ARRAY_MDSTATE" ] && [ "${ARRAY_DISKS:-0}" != "0" ]; then
-        echo "**Unraid array:** ${ARRAY_MDSTATE} (mdNumDisks=${ARRAY_DISKS})"
+      # One mdcmd status value; "|"-joined in the scan. Keys are literal.
+      md() { printf '%s' "$ARRAY_STATE" | tr '|' '\n' | awk -F= -v k="$1" '$1 == k { print substr($0, length(k) + 2); exit }'; }
+      ARRAY_MDSTATE=$(md mdState)
+      ARRAY_NUM=$(md mdNumDisks)
+      if [ -n "$ARRAY_MDSTATE" ] && [ -n "$ARRAY_DISKS" ]; then
+        n_data=$(printf '%s\n' "$ARRAY_DISKS" | grep -c .)
+        echo "**Unraid array:** ${ARRAY_MDSTATE}, ${n_data} data disk(s)."
+        echo ""
+        # Parity slots (0 and 29), when the host script reports them.
+        if printf '%s' "$ARRAY_STATE" | tr '|' '\n' | grep -q '^rdevName\.0='; then
+          parity=""
+          for slot in 0 29; do
+            dev=$(md "rdevName.$slot"); st=$(md "rdevStatus.$slot")
+            [ -n "$dev" ] || continue
+            label=parity; [ "$slot" = 29 ] && label="parity 2"
+            parity="${parity:+$parity, }${label} on ${dev}${st:+ (${st})}"
+          done
+          if [ -n "$parity" ]; then
+            echo "- Parity: ${parity}"
+          else
+            echo "- **No parity disk.** If a data disk fails, its contents are lost. Say so when the user asks about data safety, a failing disk or adding disks."
+          fi
+          resync=$(md mdResyncPos)
+          if [ -n "$resync" ] && [ "$resync" != 0 ]; then
+            echo "- A parity check or rebuild was running at container start."
+          fi
+          echo ""
+        fi
+        echo '```'
+        echo "DISK SIZE USED FREE USE%"
+        printf '%s\n' "$ARRAY_DISKS"
+        echo '```'
+        echo ""
+        full=$(printf '%s\n' "$ARRAY_DISKS" | awk '{ u = $5; sub(/%/, "", u); if (u + 0 >= 95) print $1 }' | paste -sd, - | sed 's/,/, /g')
+        if [ -n "$full" ]; then
+          echo "Nearly full (95% or more used): ${full}."
+          echo ""
+        fi
+        echo "Commands: \`host mdcmd status\`, \`host df -h\`; with the Unraid API, the \`unraid_array\` and \`unraid_disks\` actions."
+        echo ""
+      elif [ -n "$ARRAY_MDSTATE" ] && [ "${ARRAY_NUM:-0}" != "0" ]; then
+        # Older host script (host-readonly 1): state and slot count only.
+        echo "**Unraid array:** ${ARRAY_MDSTATE} (mdNumDisks=${ARRAY_NUM})"
         echo ""
         echo "Commands: \`host mdcmd status\`"
         echo ""
@@ -191,8 +234,18 @@ list_containers() {
         echo ""
       fi
 
-      if [ -n "$POOLS" ]; then
-        echo "**Pools** (from \`/boot/config/pools/\`): ${POOLS} — mounted at \`/mnt/<name>\`"
+      if [ -n "$POOL_USAGE" ]; then
+        echo "**Pools** (from \`/boot/config/pools/\`):"
+        echo ""
+        # "name fstype size used avail use% [devices]"
+        printf '%s\n' "$POOL_USAGE" | awk -v bt='`' '{
+          devs = ($7 != "") ? ", " $7 " device" ($7 == 1 ? "" : "s") : ""
+          printf "- %s — %s/mnt/%s%s, %s%s, %s, %s used (%s free)\n", $1, bt, $1, bt, $2, devs, $3, $6, $5
+        }'
+        echo ""
+      elif [ -n "$POOLS" ]; then
+        pool_paths=$(printf '%s\n' "$POOLS" | sed 's/, /\n/g' | sed 's|.*|`/mnt/&`|' | paste -sd, - | sed 's/,/, /g')
+        echo "**Pools** (from \`/boot/config/pools/\`): ${POOLS} — mounted at ${pool_paths}"
         echo ""
       fi
 
@@ -246,18 +299,21 @@ list_containers() {
         SCHEDULE="${USERSCRIPTS_SCHEDULE:-/host/boot/config/plugins/user.scripts/schedule.json}"
         schedule_for() {
           [ -r "$SCHEDULE" ] || return 0
-          # A disabled script keeps its old cron line in schedule.json; show only "disabled".
+          # Only "custom" uses the cron line: disabled, daily, hourly and so on
+          # keep a stale one in schedule.json from earlier edits.
           jq -r --arg f "$1" '
             to_entries[] | select(.key | contains("/scripts/" + $f + "/"))
             | .value
             | if .frequency == "disabled" then "disabled"
-              else (.frequency // "") + (if (.custom // "") != "" then " " + .custom else "" end) end
+              elif .frequency == "custom" then "custom " + (.custom // "")
+              else (.frequency // "") end
           ' "$SCHEDULE" 2>/dev/null | head -1
         }
         while IFS= read -r entry; do
           folder=${entry%%:*}; rest=${entry#*:}
           display=${rest%%:*}; desc=${rest#*:}
-          desc=$(printf '%s' "$desc" | sed 's/^ *//; s/ *$//')
+          # Descriptions are shown as HTML in the plugin: drop tags, keep text.
+          desc=$(printf '%s' "$desc" | sed 's/<[bB][rR][^>]*>/ /g; s/<[^>]*>//g; s/  */ /g; s/^ *//; s/ *$//')
           sched=$(schedule_for "$folder")
           line="- ${display}"
           [ -n "$desc" ] && line="${line} — ${desc}"
