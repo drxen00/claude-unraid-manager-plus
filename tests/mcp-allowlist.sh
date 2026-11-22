@@ -28,6 +28,11 @@ else
   fail "config entry: $entry"
 fi
 tools=$(printf '%s' "$entry" | jq -r '.mcpServers.unraid.env.UNRAID_RMCP_ENABLED_TOOLS')
+if [ "$(printf '%s' "$tools" | tr ',' '\n' | sed 's/^/unraid_/' | sort)" = "$expected" ]; then
+  pass "the image enables exactly the shipped action list"
+else
+  fail "enabled actions in the image: $tools"
+fi
 if printf '%s' "$entry" | grep -q dummy; then fail "API key in the MCP config"; else pass "API key not in the MCP config"; fi
 
 requests() {

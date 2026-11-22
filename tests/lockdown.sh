@@ -41,6 +41,7 @@ echo "lockdown: Claude's process"
 if in_c 'pgrep -u 99 -x claude' >/dev/null 2>&1; then pass "claude runs as uid 99"; else fail "no claude process as uid 99"; docker logs "$C" 2>&1 | tail -20; fi
 if in_c 'pgrep -u 0 -x claude' >/dev/null 2>&1; then fail "a claude process runs as root"; else pass "no claude process as root"; fi
 if in_c 'pgrep -u 99 -x tmux' >/dev/null 2>&1 && ! in_c 'pgrep -u 0 -x tmux' >/dev/null 2>&1; then pass "tmux server runs as uid 99"; else fail "tmux owner"; fi
+# shellcheck disable=SC2016 # expanded inside the container, not here
 envs=$(in_c 'tr "\0" "\n" < /proc/$(pgrep -u 99 -x claude | head -1)/environ' 2>/dev/null)
 if printf '%s' "$envs" | grep -q "$SECRET"; then fail "Unraid API key in Claude's environment"; else pass "Unraid API key not in Claude's environment"; fi
 if printf '%s\n' "$envs" | grep -qx 'HOME=/home/claude'; then pass "HOME is Claude's home"; else fail "HOME in Claude's environment"; fi
