@@ -96,7 +96,8 @@ esac
 # is the user's step (host-readonly-setup prints it); the container never
 # writes to the host. Without the raw socket, `host` goes through this.
 if [ ! -f /root/.ssh/claude-host-readonly ]; then
-  host-readonly-setup --authorized-key >/dev/null 2>&1 \n    || echo "Warning: could not create the SSH key for host checks."
+  host-readonly-setup --authorized-key >/dev/null 2>&1 \
+    || echo "Warning: could not create the SSH key for host checks."
 fi
 if [ "$DOCKER_MODE" != full ]; then
   if [ -z "${UNRAID_SSH_HOST:-}" ]; then

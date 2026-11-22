@@ -92,6 +92,7 @@ refused "host cat /etc/shadow" 'host cat /etc/shadow'
 refused "host zfs destroy" 'host zfs destroy tank'
 refused "host smartctl -t long" 'host smartctl -t long /dev/sda'
 refused "host command chaining" 'host "uptime;touch" /tmp/canary'
+# shellcheck disable=SC2016 # the literal $(...) is the payload
 refused "host substitution" 'host "uptime\$(touch)"'
 # Plain ssh with the key: sshd runs host-readonly whatever is asked for.
 refused "ssh touch" "ssh $KEYOPTS root@$SSHD 'touch /tmp/canary'"

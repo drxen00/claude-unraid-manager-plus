@@ -56,6 +56,9 @@ is_dfpath()  { [[ $1 == /boot || ( $1 =~ ^/mnt(/[A-Za-z0-9_.-]+){0,2}$ && $1 != 
 is_device()  { [[ $1 =~ ^/dev/(sd[a-z]{1,2}|nvme[0-9]{1,2}(n[0-9]{1,2})?)$ ]]; }
 is_count()   { [[ $1 =~ ^[0-9]{1,4}$ ]] && [ "$1" -ge 1 ] && [ "$1" -le 5000 ]; }
 
+# ls | xargs is kept from the original scan: Unraid's share, pool and plugin
+# names never contain whitespace or newlines.
+# shellcheck disable=SC2011,SC2012
 scan() {
   # The discovery scan claude-unraid-manager runs on every start: one
   # ::KEY::value line per item. Fixed text; nothing from the request.
