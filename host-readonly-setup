@@ -8,7 +8,13 @@
 # in the Unraid terminal, after reading the script they install.
 set -euo pipefail
 
-key="${HOME:-/root}/.ssh/claude-host-readonly"
+# The key belongs to Claude's user. Run as root (docker exec), re-run as that
+# user so the key is created with the right owner.
+if [ "$(id -u)" = 0 ] && id "${CLAUDE_USER:-claude}" >/dev/null 2>&1; then
+  exec runuser -u "${CLAUDE_USER:-claude}" -- env HOME="${CLAUDE_HOME:-/home/claude}" "$0" "$@"
+fi
+
+key="${CLAUDE_HOME:-$HOME}/.ssh/claude-host-readonly"
 dispatcher=/boot/config/claude-unraid/host-readonly
 container=$(hostname)
 

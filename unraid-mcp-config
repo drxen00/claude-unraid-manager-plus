@@ -1,24 +1,28 @@
 #!/bin/bash
-# unraid-mcp-config <path/to/.mcp.json>
+# unraid-mcp-config <path/to/mcp.json>
 #
-# Adds, refreshes or removes the "unraid" entry in a project .mcp.json, run on
-# every container start. Other MCP servers in the file are kept.
+# Adds, refreshes or removes the "unraid" server entry in an MCP config file,
+# run as root on every container start (the entrypoint passes
+# /etc/claude-code/managed-mcp.json). Other servers in the file are kept.
 #
 #   UNRAID_API_URL and UNRAID_API_KEY set  → entry written, prints "configured"
 #   either missing                         → entry removed, prints "not-configured"
 #
-# The key is never written to the file: the entry references ${UNRAID_API_KEY}
-# and Claude Code expands it from the environment when it starts the server.
-# The server is runraid (Rust, stdio, no listening port) with the atomic
-# projection and only the actions in unraid-mcp-tools enabled, unless
-# UNRAID_MCP_TOOLS overrides the list.
+# The key is never written to the MCP config. It goes into $UNRAID_MCP_HOME/.env
+# (root-owned, mode 0640, group of Claude's user), which runraid reads because
+# the entry sets UNRAID_HOME to that directory. The server is runraid (Rust,
+# stdio, no listening port) with the atomic projection and only the actions in
+# unraid-mcp-tools enabled, unless UNRAID_MCP_TOOLS overrides the list.
 #
-# Test overrides: UNRAID_MCP_TOOLS_FILE, UNRAID_MCP_BIN.
+# Test overrides: UNRAID_MCP_TOOLS_FILE, UNRAID_MCP_BIN, UNRAID_MCP_HOME,
+# UNRAID_MCP_GROUP.
 set -euo pipefail
 
-dest=${1:?usage: unraid-mcp-config <path/to/.mcp.json>}
+dest=${1:?usage: unraid-mcp-config <path/to/mcp.json>}
 tools_file=${UNRAID_MCP_TOOLS_FILE:-/usr/local/share/claude-unraid-manager/unraid-mcp-tools}
 bin=${UNRAID_MCP_BIN:-/usr/local/bin/runraid}
+home=${UNRAID_MCP_HOME:-/run/claude-unraid}
+group=${UNRAID_MCP_GROUP:-100}
 
 current='{}'
 if [ -s "$dest" ]; then
@@ -37,6 +41,7 @@ if [ -z "${UNRAID_API_URL:-}" ] || [ -z "${UNRAID_API_KEY:-}" ]; then
   if [ "$(jq '(.mcpServers // {}) | has("unraid")' <<< "$current")" = true ]; then
     write "$(jq 'del(.mcpServers.unraid)' <<< "$current")"
   fi
+  rm -f "$home/.env"
   echo not-configured
   exit 0
 fi
@@ -50,17 +55,29 @@ if [ -z "$tools" ]; then
   echo "unraid-mcp-config: no actions to enable; Unraid MCP not configured." >&2
   exit 1
 fi
+case "$UNRAID_API_KEY" in
+  *[[:space:]\"\'\\]*)
+    echo "unraid-mcp-config: the API key contains whitespace or quotes; Unraid MCP not configured." >&2
+    exit 1 ;;
+esac
 
-# "${...}" below is literal text for Claude Code to expand, not shell syntax.
-# shellcheck disable=SC2016
-write "$(jq --arg bin "$bin" --arg tools "$tools" --arg ca "${UNRAID_API_CA_BUNDLE:-}" '
+# The key file: created with no access for others before the key is written.
+mkdir -p "$home"
+chmod 0750 "$home"
+( umask 0137; : > "$home/.env.tmp" )
+printf 'UNRAID_API_KEY=%s\n' "$UNRAID_API_KEY" > "$home/.env.tmp"
+chgrp "$group" "$home" "$home/.env.tmp" 2>/dev/null || true
+mv "$home/.env.tmp" "$home/.env"
+
+write "$(jq --arg bin "$bin" --arg tools "$tools" --arg url "$UNRAID_API_URL" --arg home "$home" \
+  --arg ca "${UNRAID_API_CA_BUNDLE:-}" '
   .mcpServers.unraid = {
     type: "stdio",
     command: $bin,
     args: ["mcp"],
     env: ({
-      UNRAID_API_URL: "${UNRAID_API_URL}",
-      UNRAID_API_KEY: "${UNRAID_API_KEY}",
+      UNRAID_API_URL: $url,
+      UNRAID_HOME: $home,
       UNRAID_RMCP_PROJECTION: "atomic",
       UNRAID_RMCP_ENABLED_TOOLS: $tools
     } + (if $ca != "" then {UNRAID_API_CA_BUNDLE: $ca} else {} end))
