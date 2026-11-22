@@ -22,7 +22,7 @@ The allowlists below are the security boundary. Change them only if you know whi
   <WebUI/>
   <TemplateURL/>
   <Icon>https://raw.githubusercontent.com/mygrexit/unraid-templates/main/images/claude-unraid-manager.png</Icon>
-  <ExtraParams>--read-only --cap-drop ALL --security-opt no-new-privileges --user 0:100 --memory 64m</ExtraParams>
+  <ExtraParams>--read-only --cap-drop ALL --security-opt no-new-privileges --user 0:100 --memory 64m --cap-add DAC_OVERRIDE</ExtraParams>
   <PostArgs/>
   <DonateText/>
   <DonateLink/>

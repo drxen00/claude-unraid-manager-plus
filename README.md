@@ -155,12 +155,15 @@ pinned by digest, configured entirely by `unraid-template-socket-proxy.xml`:
   digit, so `..` path segments cannot match.
 - **Reachability:** `--network none`. It serves the filtered API as a unix
   socket in `/var/run/claude-docker-proxy` on the host (RAM, recreated each
-  start, mode 0600). Only claude-unraid-manager mounts that directory, read-only.
+  start, mode 0660, group users). Only claude-unraid-manager mounts that
+  directory, read-only.
   Per-container label allowlists are disabled in unix-socket mode, so no other
   container can grant itself access.
-- **Hardening:** `--read-only --cap-drop ALL --security-opt no-new-privileges
-  --memory 64m`. It runs as uid 0 without capabilities because the Docker
-  socket and the socket directory are owned by root.
+- **Hardening:** `--read-only --cap-drop ALL --cap-add DAC_OVERRIDE
+  --security-opt no-new-privileges --memory 64m`. It runs as uid 0 because
+  the Docker socket is `root:docker` 0660. Its one capability, DAC_OVERRIDE,
+  lets it create the socket in `/var/run/claude-docker-proxy`, which Unraid
+  creates as `nobody:users` 0755.
 - **Still visible through it:** `docker inspect` returns each container's
   environment variables (passwords, API keys) and `docker logs` whatever an
   app logs. The proxy cannot redact responses.
