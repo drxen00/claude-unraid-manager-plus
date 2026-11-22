@@ -40,11 +40,22 @@ for _ in $(seq 60); do in_c 'pgrep -u 99 -x claude' >/dev/null 2>&1 && break; sl
 echo "lockdown: Claude's process"
 if in_c 'pgrep -u 99 -x claude' >/dev/null 2>&1; then pass "claude runs as uid 99"; else fail "no claude process as uid 99"; docker logs "$C" 2>&1 | tail -20; fi
 if in_c 'pgrep -u 0 -x claude' >/dev/null 2>&1; then fail "a claude process runs as root"; else pass "no claude process as root"; fi
-if in_c 'pgrep -u 99 -x tmux' >/dev/null 2>&1 && ! in_c 'pgrep -u 0 -x tmux' >/dev/null 2>&1; then pass "tmux server runs as uid 99"; else fail "tmux owner"; fi
+# The tmux server renames itself ("tmux: server"), so no exact name match.
+tmux_users=$(in_c "ps -eo user:20,args | awk '\$2 ~ /^tmux/ {print \$1}' | sort -u | tr '\n' ' '")
+if [ "$tmux_users" = "claude " ]; then pass "tmux runs as claude only"; else fail "tmux process owners: '$tmux_users'"; in_c 'ps -eo user:20,pid,args' | grep -i tmux; fi
 # shellcheck disable=SC2016 # expanded inside the container, not here
-envs=$(in_c 'tr "\0" "\n" < /proc/$(pgrep -u 99 -x claude | head -1)/environ' 2>/dev/null)
-if printf '%s' "$envs" | grep -q "$SECRET"; then fail "Unraid API key in Claude's environment"; else pass "Unraid API key not in Claude's environment"; fi
-if printf '%s\n' "$envs" | grep -qx 'HOME=/home/claude'; then pass "HOME is Claude's home"; else fail "HOME in Claude's environment"; fi
+pid=$(in_c 'pgrep -u 99 -x claude | head -1')
+envs=$(in_c "tr '\\0' '\\n' < /proc/$pid/environ" 2>&1)
+if [ -z "$envs" ] || ! printf '%s\n' "$envs" | grep -q '^PATH='; then
+  fail "could not read Claude's environment (pid '$pid'): $(printf '%s' "$envs" | head -c 300)"
+else
+  if printf '%s' "$envs" | grep -q "$SECRET"; then fail "Unraid API key in Claude's environment"; else pass "Unraid API key not in Claude's environment"; fi
+  if printf '%s\n' "$envs" | grep -qx 'HOME=/home/claude'; then
+    pass "HOME is Claude's home"
+  else
+    fail "HOME in Claude's environment: $(printf '%s\n' "$envs" | grep '^HOME=' || echo 'not set'); names: $(printf '%s\n' "$envs" | cut -d= -f1 | tr '\n' ' ')"
+  fi
+fi
 if in_c 'bash -ic "__claude_tmux has-session -t =main" 2>/dev/null'; then pass "a root console finds the session"; else fail "console attach helper"; fi
 if in_c 'pgrep -u 99 -x claude >/dev/null || exit 1'; then pass "healthcheck command succeeds"; else fail "healthcheck"; fi
 
