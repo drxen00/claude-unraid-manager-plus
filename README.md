@@ -119,6 +119,8 @@ What each layer actually enforces:
 |---|---|---|
 | Socket proxy allowlist | the proxy container, outside Claude's container | **Yes**: a refused API call never reaches Docker |
 | Proxy has no network, its socket is only mounted into this container | Docker (`--network none`, bind mounts) | **Yes** |
+| Unraid API key permissions | Unraid's API server | **Yes**: a read-only key cannot change anything, whatever the client sends |
+| MCP action allowlist (`unraid-mcp-tools`) | the runraid process | No: it trims what Claude sees, but Claude can run runraid itself with another list; the key is the limit |
 | `/host/boot` read-only, no shares mounted | Docker bind mounts | **Yes behind the proxy** (nothing can start a container that mounts more); **no** with the raw socket |
 | Permission prompts | Claude Code, inside the container | No: a setting Claude's own user can change |
 | `claude-guard` hook | text match on the command | No: variables or a script written first get past it |
@@ -170,12 +172,45 @@ variables in the claude-docker-proxy template. They are the boundary: anything
 you add there, Claude can do without a way around it, and anything else it
 cannot.
 
+### Unraid API
+
+Host state (array, disks, shares, VMs, logs, UPS) comes from Unraid's own
+GraphQL API (Unraid 7.2+) through
+[runraid](https://github.com/dinglebear-ai/unraid/tree/main/unraid-rs), a Rust
+MCP server shipped in the image (v0.6.3, checksum-pinned). It runs over stdio,
+so it opens no port, and only the read actions in `unraid-mcp-tools` are
+enabled. Left out even though they only read: API keys, auth and OIDC
+configuration, vars, config, settings, flash, registration and rclone (they
+can hold credentials or license data), and account data.
+
+Setup:
+
+1. Unraid → Settings → Management Access → API Keys → create a key with
+   **READ_ANY** on ARRAY, DISK, DOCKER, VMS, SHARE, NOTIFICATIONS, LOGS, INFO,
+   NETWORK, SERVICES and ONLINE. Not the VIEWER role (it also reads FLASH,
+   CONFIG and VARS) and never ADMIN (it can install plugins from any URL and
+   mint new keys).
+2. In the claude-unraid-manager template set **Unraid API URL** (for example
+   `http://<server-ip>/graphql`) and **Unraid API Key**, then apply.
+3. For https with a self-signed certificate, mount the certificate and set
+   **Unraid API CA bundle** to its path. TLS verification is never turned off.
+
+**The key's permissions are the boundary**, enforced by Unraid. Everything in
+this container runs as root, so Claude can read the key and could call the API
+with it directly; a read-only key makes that harmless. Over plain http the key
+crosses your LAN unencrypted.
+
+To widen access, give the key more permissions and list more actions in
+**Unraid API actions**. Which resource each action needs is not yet mapped
+for every action: an action that returns 403 names the missing permission.
+
 ## Access Control
 
 | Mount | Default | What it enables |
 |-------|---------|----------------|
 | Docker proxy socket (`/run/docker-proxy`) | mounted (ro) | List, inspect, logs, start/stop/restart of containers; enforced by the proxy |
 | Raw Docker socket | **not mounted** | Opt-in: add `/var/run/docker.sock` as a Path to get `host` and full container management; root-equivalent, and it bypasses the proxy |
+| Unraid API key | not set | Read-only host state through the MCP server; the key's permissions decide what is readable |
 | `/host/boot` | **read-only** | View Unraid config, plugins, templates. The flash drive is read-only for Claude in the container by the mount, and for `host …` commands because they run with `/boot` remounted read-only in their own mount namespace: an ordinary write fails with "Read-only file system", whatever the command. Host commands still run as root, so one that remounts or re-enters namespaces, or hands the write to a host daemon (cron, `at`, `emcmd`, SMB, the web API) or to another container that already mounts `/boot`, gets around it; the guard asks before the common forms (cron/`at`, `emcmd`, `curl`, `smbclient`), not before `docker exec` into such a container |
 | `/host/boot` (rw) | opt-in | Modify config, install plugins, edit templates; commands that touch the flash drive should ask you first, with a reason (text match, so not every spelling) |
 | `/appdata` | not mounted | Inspect other containers' configs and logs |
