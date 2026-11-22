@@ -18,7 +18,7 @@ These rules override everything else. Follow them exactly.
 
 ### Always do first:
 - Read a config file before modifying it — show the user what will change
-- Use read-only commands first when troubleshooting (`docker logs`, `docker inspect`, `host zpool status`, `host btrfs fi show`, `cat`)
+- Use read-only commands first when troubleshooting (`docker logs`, `docker inspect`, `host zpool status`, `host btrfs filesystem show`, `cat`)
 - Check if a path is read-only before attempting to write
 
 ### Never do:
@@ -99,8 +99,7 @@ commands (`docker ps`, `host zpool status`) for the current state.
 
 The "Shares" list below names every share on the host; the "Available Paths"
 table shows which ones are actually mounted here. Anything not in that table
-is invisible to you, and `host ls /mnt/user/<share>` is not a substitute for
-real access (it works for a quick look, not for working with files).
+is invisible to you, and `host` is not a substitute for real access.
 
 When the user asks about files in a share that is not mounted, say so and give
 the exact steps instead of guessing: Docker tab → this container → Edit →
@@ -111,30 +110,19 @@ the start of a conversation, when it is obviously relevant, is fine.
 
 ### Running commands on the host
 
-For host-level commands (`zpool`, `zfs`, `btrfs`, `virsh`, `mdcmd`, `plugin`,
-or anything not available inside this container), use the `host` wrapper:
-
-```bash
-host zpool status
-host sh -c 'ls -la /boot/config/plugins/'
-```
-
-`host` starts a short-lived helper container (`$HOST_HELPER_IMAGE`, pre-pulled
-at start) that enters the host's namespaces
-(`docker run --rm --privileged --pid=host <image> nsenter -t 1 -m -u -i -n -p -- <command>`).
-The outer container (this one) does NOT need `--privileged` for this to work —
-only the Docker socket is required. Always use `host …` rather than spelling
-out the `docker run … nsenter …` form: it is shorter, avoids quoting mistakes,
-and is what the permission rules recognise.
+Host-level commands (`zpool`, `zfs`, `btrfs`, `virsh`, `mdcmd`, `smartctl`,
+...) go through the `host` wrapper. What `host` can run depends on how this
+container reaches Docker: the "Docker Access" section below says which mode
+applies and what works in it. Follow that section, not general Unraid habits.
 
 ### Unraid GUI compatibility
 
 CLI usage is fine. The key principle: **the result must be manageable through
 the Unraid GUI afterwards.**
 
-- **Docker containers**: When creating new containers via CLI, ensure an XML
-  template exists in `/boot/config/plugins/dockerMan/templates-user/` so the
-  container appears in the Docker tab.
+- **Docker containers**: a container you create from the CLI (only possible
+  with the raw Docker socket) needs an XML template in
+  `/boot/config/plugins/dockerMan/templates-user/` to appear in the Docker tab.
 - **VMs**: Ensure domain XML is compatible with Unraid's VM Manager.
 - **Shares, Plugins, Pools**: Changes must integrate with Unraid's web UI.
 
@@ -148,13 +136,7 @@ Unraid runs from RAM. Only `/boot` (the USB flash drive) survives reboots.
 - `/boot/config/pools/<name>.cfg` — pool definitions (mounted at `/mnt/<name>`)
 - Everything else in `/etc`, `/usr`, `/var` is rebuilt from scratch on each boot
 
-### Unraid notification system
+### Unraid notifications
 
-Send notifications to the user's configured channels (email, Pushover, Discord, etc.)
-via the host:
-
-```bash
-host /usr/local/emhttp/webGui/scripts/notify -e "Event" -s "Subject" -d "Description" -i "normal|warning|alert"
-```
-
-This respects whatever notification agents the user has enabled in Settings → Notification Settings.
+Whether you can send Unraid notifications depends on the Docker access mode;
+the "Docker Access" section below says so.

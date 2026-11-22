@@ -70,7 +70,7 @@ ok_out() {
   local label=$1 want=$2 cmd=$3 out
   if out=$(mgr "$cmd" 2>&1) && printf '%s' "$out" | grep -q -- "$want"; then pass "$label"; else fail "$label: $out"; fi
 }
-ok_out "host version" '^1$' 'host version'
+ok_out "host version" "^$(sed -n 's/^VERSION=//p' "$ROOT/host-readonly")\$" 'host version'
 ok_out "host uptime" 'load average' 'host uptime'
 ok_out "host df -h" 'Filesystem' 'host df -h'
 ok_out "host free" 'Mem:' 'host free'

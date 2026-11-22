@@ -88,12 +88,14 @@ write_scan() {
 ::ZFS_DATASETS::tank/media 3T 6.7T /mnt/tank/media|nvme/appdata 50G 900G /mnt/nvme/appdata|
 ::ZFS_ENCRYPTED::nvme/secrets,
 ::BTRFS::Label: none  uuid: 79cc1003-f05f-4e01-babc-1e6ebe37e682|	Total devices 1 FS bytes used 1.17MiB|	devid    1 size 1.00GiB used 126.38MiB path /dev/loop3||Label: 'cache2'  uuid: 1111-2222|	Total devices 2 FS bytes used 100.00GiB|	devid    1 size 1.00TiB used 50.00GiB path /dev/sdc1|	devid    2 size 1.00TiB used 50.00GiB path /dev/sdd1||
-::ARRAY_STATE::mdNumDisks=5|mdState=STARTED|
+::ARRAY_STATE::mdNumDisks=5|mdState=STARTED|mdResyncPos=0|rdevName.0=sdb|rdevStatus.0=DISK_OK|rdevName.29=|rdevStatus.29=DISK_NP_DSBL|
+::ARRAY_DISKS::disk1 7.3T 7.2T 60G 99%|disk2 1.9T 1.0T 900G 53%|disk10 3.7T 1.0T 2.7T 27%|
 ::SHARES::appdata,media,
 ::POOLS::cache,nvme,
+::POOL_USAGE::cache btrfs 1.9T 210G 1.7T 11% 2|nvme zfs 1.8T 900G 900G 50% |
 ::VMS::win11:shut off|Home Assistant:running|
 ::PLUGINS::dynamix.system.temp,unassigned.devices,
-::USERSCRIPTS::zfs-snapshot:ZFS Snapshot:Daily snapshots of tank/media|cleanup-tmp:cleanup-tmp:|lock dataset:Lock Dataset:|
+::USERSCRIPTS::zfs-snapshot:ZFS Snapshot:Daily snapshots of tank/media|cleanup-tmp:cleanup-tmp:|lock dataset:Lock Dataset:|plex-codec:plex codec:Fix codecs<br>(see https://example.org/a)<b>!</b>|
 ::NETWORK::eth0 UP 192.168.1.10/24,bond0 UP ,br0 UP 192.168.1.10/24,tunl0@NONE DOWN ,docker0 DOWN 172.17.0.1/16,br-79c60d7ee5a9 UP 172.18.0.1/16,virbr0 DOWN 192.168.122.1/24,veth1a2b3c UP fe80::1/64,vnet0 UNKNOWN fe80::2/64,shim-br0@br0 UP 192.168.1.10/24,tailscale1 UNKNOWN 100.110.244.19/32,
 EOF
 }
@@ -102,7 +104,8 @@ EOF
 cat > "$TMP/schedule.json" <<'EOF'
 {
   "/boot/config/plugins/user.scripts/scripts/zfs-snapshot/script": { "frequency": "custom", "custom": "0 3 * * *", "id": "1" },
-  "/boot/config/plugins/user.scripts/scripts/cleanup-tmp/script": { "frequency": "disabled", "custom": "0 4 * * *", "id": "2" }
+  "/boot/config/plugins/user.scripts/scripts/cleanup-tmp/script": { "frequency": "disabled", "custom": "0 4 * * *", "id": "2" },
+  "/boot/config/plugins/user.scripts/scripts/plex-codec/script": { "frequency": "daily", "custom": "0 4 * * *", "id": "3" }
 }
 EOF
 
@@ -155,19 +158,36 @@ expect_contains "$TMP/CLAUDE.md" "tank 10.9T 4.2T 6.7T ONLINE"
 expect_contains "$TMP/CLAUDE.md" "nvme 1.8T 900G 900G ONLINE"
 expect_contains "$TMP/CLAUDE.md" "nvme/appdata 50G 900G /mnt/nvme/appdata"
 expect_contains "$TMP/CLAUDE.md" "Encrypted datasets: nvme/secrets"
-expect_contains "$TMP/CLAUDE.md" "**Unraid array:** STARTED (mdNumDisks=5)"
-expect_contains "$TMP/CLAUDE.md" "cache, nvme"
+expect_contains "$TMP/CLAUDE.md" "**Unraid array:** STARTED, 3 data disk(s)."
+expect_contains "$TMP/CLAUDE.md" "- Parity: parity on sdb (DISK_OK)"
+expect_not_contains "$TMP/CLAUDE.md" "parity 2"
+expect_not_contains "$TMP/CLAUDE.md" "No parity disk"
+expect_not_contains "$TMP/CLAUDE.md" "running at container start"
+expect_contains "$TMP/CLAUDE.md" "disk1 7.3T 7.2T 60G 99%"
+expect_contains "$TMP/CLAUDE.md" "disk10 3.7T 1.0T 2.7T 27%"
+expect_contains "$TMP/CLAUDE.md" "Nearly full (95% or more used): disk1."
+expect_not_contains "$TMP/CLAUDE.md" "mdNumDisks"
+expect_contains "$TMP/CLAUDE.md" "- cache — \`/mnt/cache\`, btrfs, 2 devices, 1.9T, 11% used (1.7T free)"
+expect_contains "$TMP/CLAUDE.md" "- nvme — \`/mnt/nvme\`, zfs, 1.8T, 50% used (900G free)"
+expect_not_contains "$TMP/CLAUDE.md" "— mounted at \`/mnt/<name>\`"
 expect_contains "$TMP/CLAUDE.md" "**Shares:** appdata, media"
 expect_contains "$TMP/CLAUDE.md" "- win11 (shut off)"
 expect_contains "$TMP/CLAUDE.md" "- Home Assistant (running)"
-expect_contains "$TMP/CLAUDE.md" "Label: 'cache2'  uuid: 1111-2222"
-expect_contains "$TMP/CLAUDE.md" "Total devices 2 FS bytes used 100.00GiB"
+expect_not_contains "$TMP/CLAUDE.md" "**btrfs volumes:**"             # the pools line covers it
 expect_not_contains "$TMP/CLAUDE.md" "79cc1003-f05f-4e01-babc-1e6ebe37e682"
 expect_not_contains "$TMP/CLAUDE.md" "/dev/sdc1"
 expect_contains "$TMP/CLAUDE.md" "- unassigned.devices"
 expect_contains "$TMP/CLAUDE.md" "- ZFS Snapshot — Daily snapshots of tank/media [custom 0 3 * * *]"
 expect_contains "$TMP/CLAUDE.md" "- cleanup-tmp [disabled]"
 expect_not_contains "$TMP/CLAUDE.md" "[disabled 0 4"
+expect_contains "$TMP/CLAUDE.md" "- plex codec — Fix codecs (see https://example.org/a)! [daily]"
+expect_not_contains "$TMP/CLAUDE.md" "<br>"
+expect_not_contains "$TMP/CLAUDE.md" "[daily 0 4"
+# Mode-specific text: with the raw socket, host sh and notify are described.
+expect_contains "$TMP/CLAUDE.md" "nsenter -t 1"
+expect_contains "$TMP/CLAUDE.md" "webGui/scripts/notify"
+expect_not_contains "$TMP/CLAUDE.md" "host btrfs fi show"
+expect_not_contains "$TMP/CLAUDE.md" "host ls /mnt/user"
 expect_contains "$TMP/CLAUDE.md" "- Lock Dataset"
 expect_not_contains "$TMP/CLAUDE.md" "- Lock Dataset —"
 expect_contains "$TMP/CLAUDE.md" "- plex (plexinc/pms-docker, Up 3 days)"
@@ -221,9 +241,41 @@ echo "scanner: pool-only setup"
 rm -f "$TMP/CLAUDE.md"
 write_scan "net:[1]"
 # Observed on a real Unraid 7 pool-only box: the array service is STARTED with no disks.
-sed -i 's/^::ARRAY_STATE::.*/::ARRAY_STATE::mdNumDisks=0|mdState=STARTED|/' "$TMP/scan.txt"
+sed -i 's/^::ARRAY_STATE::.*/::ARRAY_STATE::mdNumDisks=0|mdState=STARTED|rdevName.0=|rdevStatus.0=DISK_NP_DSBL|/; /^::ARRAY_DISKS::/d' "$TMP/scan.txt"
 run_generator
 expect_contains "$TMP/CLAUDE.md" "**Unraid array:** STARTED with 0 data disks"
+expect_not_contains "$TMP/CLAUDE.md" "No parity disk"
+
+# ── Scanner: array without parity ────────────────────────────────────────────
+echo "scanner: array without parity"
+rm -f "$TMP/CLAUDE.md"
+write_scan "net:[1]"
+sed -i 's/rdevName\.0=sdb|rdevStatus\.0=DISK_OK/rdevName.0=|rdevStatus.0=DISK_NP_DSBL/; s/mdResyncPos=0/mdResyncPos=12345/' "$TMP/scan.txt"
+run_generator
+expect_contains "$TMP/CLAUDE.md" "- **No parity disk.** If a data disk fails, its contents are lost."
+expect_not_contains "$TMP/CLAUDE.md" "- Parity:"
+expect_contains "$TMP/CLAUDE.md" "A parity check or rebuild was running at container start."
+
+echo "scanner: dual parity"
+rm -f "$TMP/CLAUDE.md"
+write_scan "net:[1]"
+sed -i 's/rdevName\.29=|rdevStatus\.29=DISK_NP_DSBL/rdevName.29=sdk|rdevStatus.29=DISK_OK/' "$TMP/scan.txt"
+run_generator
+expect_contains "$TMP/CLAUDE.md" "- Parity: parity on sdb (DISK_OK), parity 2 on sdk (DISK_OK)"
+
+# ── Scanner: host script version 1 (no disk, parity or pool detail) ──────────
+echo "scanner: older host-readonly"
+rm -f "$TMP/CLAUDE.md"
+write_scan "net:[1]"
+sed -i 's/^::ARRAY_STATE::.*/::ARRAY_STATE::mdNumDisks=5|mdState=STARTED|/; /^::ARRAY_DISKS::/d; /^::POOL_USAGE::/d' "$TMP/scan.txt"
+run_generator
+expect_contains "$TMP/CLAUDE.md" "**Unraid array:** STARTED (mdNumDisks=5)"
+expect_not_contains "$TMP/CLAUDE.md" "No parity disk"
+expect_contains "$TMP/CLAUDE.md" "**btrfs volumes:**"
+expect_contains "$TMP/CLAUDE.md" "Label: 'cache2'  uuid: 1111-2222"
+expect_contains "$TMP/CLAUDE.md" "Total devices 2 FS bytes used 100.00GiB"
+expect_not_contains "$TMP/CLAUDE.md" "79cc1003-f05f-4e01-babc-1e6ebe37e682"
+expect_contains "$TMP/CLAUDE.md" "cache, nvme — mounted at \`/mnt/cache\`, \`/mnt/nvme\`"
 
 # ── Scanner: host scan fails ─────────────────────────────────────────────────
 echo "scanner: host scan failure"
@@ -275,6 +327,13 @@ expect_contains "$TMP/CLAUDE.md" "- win11 (shut off)"
 expect_contains "$TMP/CLAUDE.md" "- plex (plexinc/pms-docker, Up 3 days)"
 expect_not_contains "$TMP/CLAUDE.md" "Host checks are not set up"
 expect_not_contains "$TMP/CLAUDE.md" "Host scan over SSH failed"
+expect_contains "$TMP/CLAUDE.md" "- Parity: parity on sdb (DISK_OK)"
+# Behind the proxy, nothing may suggest general host commands or notify.
+expect_not_contains "$TMP/CLAUDE.md" "host sh -c"
+expect_not_contains "$TMP/CLAUDE.md" "nsenter -t 1"
+expect_not_contains "$TMP/CLAUDE.md" "webGui/scripts/notify"
+expect_contains "$TMP/CLAUDE.md" "You cannot send Unraid notifications in this mode"
+expect_contains "$TMP/CLAUDE.md" "CLI (only possible"
 
 echo "scanner: Unraid API configured"
 rm -f "$TMP/CLAUDE.md"
