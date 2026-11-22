@@ -1,0 +1,16 @@
+{
+  "name": "unraid-watch",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Watches the Unraid server, reports to Discord, asks before fixing.",
+  "type": "module",
+  "main": "src/main.mjs",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "start": "node src/main.mjs",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "discord.js": "14.28.1"
+  }
+}

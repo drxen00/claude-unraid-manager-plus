@@ -1,12 +1,15 @@
 # Design: watcher + Discord approvals (proposal)
 
-Status: proposal, nothing built yet. **Deferred** until the hardening work
-(socket proxy, Unraid API MCP, constrained `host`, pinned settings) has landed
-and been reviewed. When it is picked up, these constraints override the
-sketch below:
+Status: **partly built**, see `watcher/` and [discord.md](discord.md). What
+shipped differs from the sketch below: a Node.js watcher instead of bun; no
+Discord channel plugin in the interactive session (plugin MCP servers do not
+load under `managed-mcp.json`); the watcher reads containers through the
+socket proxy and the array and disks through the read-only host checks; the
+action catalog is container start/stop/restart only, because the proxy and the
+read-only host checks allow nothing else. Kept from the original constraints:
 
-- The watcher never gets the Docker socket or the proxy. It reads only through
-  the read-only Unraid MCP (scoped API key) and a read-only appdata mount.
+- The watcher never gets the raw Docker socket. It reads through the socket
+  proxy, the read-only host checks and the scoped, read-only API key.
 - Container actions go through the socket proxy's start/stop/restart
   allowlist; nothing else is reachable from a button.
 - Discord and Remote Control are management paths outside WireGuard. Both are

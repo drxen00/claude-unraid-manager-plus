@@ -13,13 +13,23 @@ RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
     && chmod 0755 /claude \
     && /claude --version
 
+# ── watcher: the Discord reporter (watcher/), dependencies from the lockfile ──
+FROM node:24-trixie-slim AS watcher
+WORKDIR /watcher
+COPY watcher/package.json watcher/package-lock.json ./
+RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
+COPY watcher/src ./src
+RUN node --check src/main.mjs && cp /usr/local/bin/node /watcher/node
+
 # ── runtime ──────────────────────────────────────────────────────────────────
-# No Node.js in the runtime image: Claude Code runs natively. MCP servers that
-# are started through `npx` therefore do not work inside this container.
+# Claude Code runs natively. Node.js is only shipped for the watcher, outside
+# PATH, and without npm/npx: MCP servers started through `npx` do not work
+# inside this container.
 # trixie (Debian 13): runraid needs glibc 2.38, bookworm has 2.36.
 FROM debian:trixie-slim
 
 COPY --from=build /claude /usr/local/bin/claude
+COPY --from=watcher /watcher /usr/local/share/claude-unraid-manager/watcher
 
 # Docker CLI only (Debian's docker.io would pull in dockerd, containerd, runc).
 COPY --from=docker:28-cli /usr/local/bin/docker /usr/local/bin/docker

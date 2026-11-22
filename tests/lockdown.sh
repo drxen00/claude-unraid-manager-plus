@@ -9,12 +9,14 @@
 #   - the Unraid API key is in neither Claude's environment nor the MCP config,
 #     only in the root-owned key file
 #   - home, workspace and CLAUDE.md belong to Claude's user
+#   - the Discord bot token is not in Claude's environment; the watcher starts
 # Needs Docker and jq. Creates and removes the container cum-lock only.
 set -uo pipefail
 
 IMAGE=${1:?usage: lockdown.sh <manager-image>}
 C=cum-lock
 SECRET=dummy-secret-key-5f3a
+DISCORD_SECRET=dummy-discord-token-9c1e
 
 FAIL=0
 pass() { echo "  ok   $1"; }
@@ -34,6 +36,7 @@ else
 fi
 
 docker run -d --name "$C" -e UNRAID_API_URL=http://127.0.0.1:9/graphql -e UNRAID_API_KEY="$SECRET" \
+  -e DISCORD_BOT_TOKEN="$DISCORD_SECRET" -e DISCORD_USER_ID=184695080709324800 -e REPORT_TIME=off \
   -e REMOTE_CONTROL_NAME=off "$IMAGE" >/dev/null
 for _ in $(seq 60); do in_c 'pgrep -u 99 -x claude' >/dev/null 2>&1 && break; sleep 1; done
 
@@ -58,6 +61,7 @@ if [ -z "$envs" ] || ! printf '%s\n' "$envs" | grep -q '^PATH='; then
   fail "could not read Claude's environment (pid '$pid'): $(printf '%s' "$envs" | head -c 300)"
 else
   if printf '%s' "$envs" | grep -q "$SECRET"; then fail "Unraid API key in Claude's environment"; else pass "Unraid API key not in Claude's environment"; fi
+  if printf '%s' "$envs" | grep -q "$DISCORD_SECRET"; then fail "Discord token in Claude's environment"; else pass "Discord token not in Claude's environment"; fi
   if printf '%s\n' "$envs" | grep -qx 'HOME=/home/claude'; then
     pass "HOME is Claude's home"
   else
@@ -66,6 +70,10 @@ else
 fi
 if in_c 'bash -ic "__claude_tmux has-session -t =main" 2>/dev/null'; then pass "a root console finds the session"; else fail "console attach helper"; fi
 if in_c 'pgrep -u 99 -x claude >/dev/null || exit 1'; then pass "healthcheck command succeeds"; else fail "healthcheck"; fi
+if docker logs "$C" 2>&1 | grep -q "Discord: watcher running"; then pass "Discord watcher started"; else fail "Discord watcher not started"; docker logs "$C" 2>&1 | grep -i discord; fi
+# The dummy token cannot log in; whatever the watcher logs, it must not print the token.
+if docker logs "$C" 2>&1 | grep -q "$DISCORD_SECRET"; then fail "Discord token printed in the log"; else pass "Discord token not in the log"; fi
+if [ "$(in_c 'stat -c %U /workspace/watch')" = claude ]; then pass "watch directory belongs to Claude's user"; else fail "watch directory owner"; fi
 
 echo "lockdown: policy files"
 owner() { in_c "stat -c '%U:%G %a' $1"; }
