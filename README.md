@@ -99,7 +99,7 @@ To build the image yourself instead, see
 
 The container reaches Docker through a filtering socket proxy, a second container that holds the real socket and passes on only an allowlist of API calls (see [Socket proxy](#socket-proxy)). Claude can list, inspect and read logs of containers, and start, stop and restart them; nothing else.
 
-With the raw Docker socket mounted instead (opt-in, not the default), it can also run host-level commands (like `zpool status` or `virsh list`) through a `host` wrapper: `host <command>` starts a short-lived privileged helper container (`alpine`) that enters the host's namespaces and runs the command there. Behind the proxy `host` is unavailable, and the host details below are missing from the scan until host reads move to a restricted path (planned: the Unraid API and an SSH forced command).
+With the raw Docker socket mounted instead (opt-in, not the default), it can also run host-level commands (like `zpool status` or `virsh list`) through a `host` wrapper: `host <command>` starts a short-lived privileged helper container (`alpine`) that enters the host's namespaces and runs the command there. Behind the proxy, `host` runs only a fixed list of read-only checks on the host over SSH, enforced by the host (see [Host checks over SSH](#host-checks-over-ssh)); the discovery scan uses the same path.
 
 On every start (full detail only with the raw socket), a discovery script scans the host and generates a `CLAUDE.md` in the workspace with:
 - System info (Unraid version, CPU, RAM)
@@ -120,6 +120,7 @@ What each layer actually enforces:
 | Socket proxy allowlist | the proxy container, outside Claude's container | **Yes**: a refused API call never reaches Docker |
 | Proxy has no network, its socket is only mounted into this container | Docker (`--network none`, bind mounts) | **Yes** |
 | Unraid API key permissions | Unraid's API server | **Yes**: a read-only key cannot change anything, whatever the client sends |
+| Host checks: forced command for one SSH key | the Unraid host's sshd | **Yes**: that key only ever runs `host-readonly`, which only reads |
 | MCP action allowlist (`unraid-mcp-tools`) | the runraid process | No: it trims what Claude sees, but Claude can run runraid itself with another list; the key is the limit |
 | `/host/boot` read-only, no shares mounted | Docker bind mounts | **Yes behind the proxy** (nothing can start a container that mounts more); **no** with the raw socket |
 | Permission prompts | Claude Code, inside the container | No: a setting Claude's own user can change |
@@ -203,6 +204,49 @@ crosses your LAN unencrypted.
 To widen access, give the key more permissions and list more actions in
 **Unraid API actions**. Which resource each action needs is not yet mapped
 for every action: an action that returns 403 names the missing permission.
+
+### Host checks over SSH
+
+Some host detail is not in the Unraid API: `zpool status` with errors,
+`smartctl` output, `btrfs device stats`, the syslog, and the discovery scan
+that fills `CLAUDE.md`. Behind the proxy, `host <check>` gets these from
+`host-readonly`, a script you install on the flash drive and bind to one SSH
+key:
+
+```
+restrict,command="/bin/bash /boot/config/claude-unraid/host-readonly" ssh-ed25519 AAAA… claude-unraid-manager-host-readonly
+```
+
+- **sshd enforces it.** For that key the Unraid host runs `host-readonly`,
+  whatever the client asks for. `restrict` turns off port, agent and X11
+  forwarding, the pty, scp and sftp. Claude can read the private key; it
+  still only gets the checks.
+- **The checks** (`host help`): `uptime`, `free`, `df`, `lsblk`, `mdstat`,
+  `ps`, `sensors`, `mdcmd status`, `zpool status|list`, `zfs list|get`,
+  `btrfs filesystem show|usage`, `btrfs device stats`, `btrfs scrub status`,
+  `smartctl --scan` and `-H|-i|-A|-a|-x /dev/<disk>`, `ip addr|link|route`,
+  `virsh list|dominfo`, `syslog [lines]`, `scan`, `version`. All of them only
+  read.
+- **How requests are checked:** only `[A-Za-z0-9 _./:=,@+-]` is accepted,
+  every argument is validated (pool and dataset names, `/dev/sdX` and
+  `/dev/nvmeN` only, `/mnt/<x>` paths without `..`), and the command runs as
+  a fixed argument list with no shell and globbing off.
+- **Tested:** `tests/ssh-acceptance.sh` installs it on a real OpenSSH server
+  with the line `host-readonly-setup` prints, then checks the allowed checks,
+  that everything else is refused through `host` and through plain `ssh`
+  with the key, that no shell, forwarding, scp or sftp works, and that
+  nothing ran.
+
+Setup: in the container console run `host-readonly-setup`. It prints the
+commands to run in the Unraid terminal (copy the script to
+`/boot/config/claude-unraid/`, read it, append the key line to
+`/root/.ssh/authorized_keys`). Then set **Unraid SSH host** to the server's
+LAN IP in the template. SSH must be on (Settings → Management Access). The
+container never writes to the host for this. To undo, delete the line.
+
+Not yet checked on a real Unraid server: that `/root/.ssh` survives reboots
+there (it points to `/boot/config/ssh/root` on Unraid 6.9 and later), and the
+output of each check on Unraid's own tools.
 
 ## Access Control
 
