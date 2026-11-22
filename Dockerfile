@@ -16,7 +16,8 @@ RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
 # ── runtime ──────────────────────────────────────────────────────────────────
 # No Node.js in the runtime image: Claude Code runs natively. MCP servers that
 # are started through `npx` therefore do not work inside this container.
-FROM debian:bookworm-slim
+# trixie (Debian 13): runraid needs glibc 2.38, bookworm has 2.36.
+FROM debian:trixie-slim
 
 COPY --from=build /claude /usr/local/bin/claude
 
