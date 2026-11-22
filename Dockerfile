@@ -44,10 +44,13 @@ COPY bashrc                /usr/local/share/claude-unraid-manager/bashrc
 RUN printf '\n' >> /etc/bash.bashrc && cat /usr/local/share/claude-unraid-manager/bashrc >> /etc/bash.bashrc
 COPY settings.json         /usr/local/share/claude-unraid-manager/settings.json
 COPY unraid-mcp-tools      /usr/local/share/claude-unraid-manager/unraid-mcp-tools
-COPY entrypoint.sh generate-claude-md.sh host boot-mode docker-mode logs claude-guard claude-session claude-settings-merge unraid-mcp-config /usr/local/bin/
+# Installed on the host by the user (host-readonly-setup prints the steps);
+# also run through the privileged helper for the scan when the raw socket is mounted.
+COPY host-readonly         /usr/local/share/claude-unraid-manager/host-readonly
+COPY entrypoint.sh generate-claude-md.sh host boot-mode docker-mode logs claude-guard claude-session claude-settings-merge unraid-mcp-config host-readonly-setup /usr/local/bin/
 RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/generate-claude-md.sh \
              /usr/local/bin/host /usr/local/bin/boot-mode /usr/local/bin/docker-mode /usr/local/bin/logs /usr/local/bin/claude-guard \
-             /usr/local/bin/claude-session /usr/local/bin/claude-settings-merge /usr/local/bin/unraid-mcp-config
+             /usr/local/bin/claude-session /usr/local/bin/claude-settings-merge /usr/local/bin/unraid-mcp-config /usr/local/bin/host-readonly-setup
 
 # IS_SANDBOX is deliberately not set: it only serves to allow
 # --dangerously-skip-permissions as root, which this image does not support.

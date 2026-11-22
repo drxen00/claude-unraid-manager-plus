@@ -1,0 +1,52 @@
+#!/bin/bash
+# host-readonly-setup — the steps to install the read-only host checks.
+#
+#   host-readonly-setup                    print the steps (creates the key if needed)
+#   host-readonly-setup --authorized-key   print only the authorized_keys line
+#
+# The container never writes to the host itself: you run the printed commands
+# in the Unraid terminal, after reading the script they install.
+set -euo pipefail
+
+key="${HOME:-/root}/.ssh/claude-host-readonly"
+dispatcher=/boot/config/claude-unraid/host-readonly
+container=$(hostname)
+
+if [ ! -f "$key" ]; then
+  mkdir -p "$(dirname "$key")"
+  chmod 700 "$(dirname "$key")"
+  ssh-keygen -q -t ed25519 -N '' -C claude-unraid-manager-host-readonly -f "$key"
+fi
+line="restrict,command=\"/bin/bash $dispatcher\" $(cat "$key.pub")"
+
+if [ "${1:-}" = --authorized-key ]; then
+  printf '%s\n' "$line"
+  exit 0
+fi
+
+cat <<EOF
+Read-only host checks: setup
+
+Run these in the Unraid terminal as root (Unraid web UI, top right, terminal
+icon). The container does not do this for you.
+
+1. Copy the check script to the flash drive and read it:
+
+   mkdir -p /boot/config/claude-unraid
+   docker cp $container:/usr/local/share/claude-unraid-manager/host-readonly $dispatcher
+   less $dispatcher
+
+2. Allow this container's key to run that script and nothing else:
+
+   echo '$line' >> /root/.ssh/authorized_keys
+
+   On Unraid 6.9 and later /root/.ssh points to /boot/config/ssh/root, so this
+   survives reboots. Check with: ls -l /root/.ssh
+
+3. SSH must be on: Settings → Management Access → Use SSH: Yes.
+
+4. In this container's template set "Unraid SSH host" to the server's LAN IP
+   and apply. Then test from the console: host version
+
+To undo: delete that line from /root/.ssh/authorized_keys.
+EOF

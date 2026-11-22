@@ -1,0 +1,242 @@
+#!/bin/bash
+# host-readonly — a fixed list of read-only checks on the Unraid host, for
+# the claude-unraid-manager container.
+#
+# You install it on the flash drive yourself and bind it to one SSH key in
+# /root/.ssh/authorized_keys:
+#
+#   restrict,command="/bin/bash /boot/config/claude-unraid/host-readonly" ssh-ed25519 AAAA… claude-unraid-manager-host-readonly
+#
+# For every connection with that key sshd runs this script, whatever the
+# client asked for; the request only arrives as text in SSH_ORIGINAL_COMMAND.
+# "restrict" turns off port, agent and X11 forwarding, the pty and
+# ~/.ssh/rc. The request is checked against the commands below and run as a
+# fixed argument list: nothing is handed to a shell, globbing is off, and only
+# the characters [A-Za-z0-9 _./:=,@+-] are accepted at all.
+#
+# Everything here only reads. Nothing in this script changes the host.
+#
+#   host-readonly <command …>            run locally (as root), same rules
+#   host-readonly --print <command …>    print what would run, run nothing
+#   host-readonly help                   list the commands
+set -u -f
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export LC_ALL=C
+VERSION=1
+
+print=false
+if [ "${1:-}" = --print ]; then print=true; shift; fi
+if [ -n "${SSH_ORIGINAL_COMMAND+x}" ]; then
+  request=$SSH_ORIGINAL_COMMAND
+else
+  request="$*"
+fi
+
+refuse() {
+  echo "host-readonly: refused: $1" >&2
+  echo "host-readonly: only the read-only checks listed by 'help' run here." >&2
+  exit 65
+}
+run() {
+  # Arguments are validated to [A-Za-z0-9_./:=,@+-] by now, so plain is exact.
+  if $print; then printf '%s ' "$@"; echo; exit 0; fi
+  if ! command -v "$1" >/dev/null 2>&1; then
+    echo "host-readonly: $1 is not installed on this host" >&2
+    exit 69
+  fi
+  exec "$@"
+}
+
+# Argument validators: 0 for an acceptable value.
+is_name()    { [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$ ]]; }
+is_dataset() { [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9_.:/@-]{0,255}$ && $1 != *..* && $1 != *//* ]]; }
+is_props()   { [[ $1 =~ ^[a-z][a-z0-9_:.,]{0,255}$ ]]; }
+is_mnt()     { [[ $1 =~ ^/mnt/[A-Za-z0-9_.-]+$ && $1 != *..* ]]; }
+is_dfpath()  { [[ $1 == /boot || ( $1 =~ ^/mnt(/[A-Za-z0-9_.-]+){0,2}$ && $1 != *..* ) ]]; }
+is_device()  { [[ $1 =~ ^/dev/(sd[a-z]{1,2}|nvme[0-9]{1,2}(n[0-9]{1,2})?)$ ]]; }
+is_count()   { [[ $1 =~ ^[0-9]{1,4}$ ]] && [ "$1" -ge 1 ] && [ "$1" -le 5000 ]; }
+
+scan() {
+  # The discovery scan claude-unraid-manager runs on every start: one
+  # ::KEY::value line per item. Fixed text; nothing from the request.
+  if $print; then echo scan; exit 0; fi
+  # Globs below are fixed paths (plugins, pools, User Scripts), not input.
+  set +f
+  echo "::VERSION::$(grep -oP "(?<=version=\")[^\"]+" /etc/unraid-version 2>/dev/null)"
+  echo "::HOSTNAME::$(hostname)"
+  echo "::CPU::$(grep -m1 "model name" /proc/cpuinfo 2>/dev/null | cut -d: -f2 | xargs)"
+  echo "::RAM::$(free -h 2>/dev/null | awk "/Mem:/{print \$2}")"
+  echo "::UPTIME::$(uptime -p 2>/dev/null || uptime | sed "s/.*up /up /" | sed "s/,.*load.*//")"
+  echo "::NETNS::$(readlink /proc/self/ns/net 2>/dev/null)"
+
+  if command -v zpool >/dev/null 2>&1; then
+    echo "::ZFS_POOLS::$(zpool list -Ho name,size,alloc,free,health 2>/dev/null | tr "\n" "|")"
+    echo "::ZFS_DATASETS::$(zfs list -Ho name,used,avail,mountpoint 2>/dev/null | head -30 | tr "\n" "|")"
+    # -t: snapshots inherit the property and would be listed too.
+    echo "::ZFS_ENCRYPTED::$(zfs get -Ho name,value encryption -t filesystem,volume 2>/dev/null | grep -v "off$" | awk "{print \$1}" | tr "\n" ",")"
+  fi
+  if command -v btrfs >/dev/null 2>&1; then
+    # Full output incl. device lines; loop-backed images are filtered out later.
+    echo "::BTRFS::$(btrfs filesystem show 2>/dev/null | tr "\n" "|")"
+  fi
+  echo "::ARRAY_STATE::$(mdcmd status 2>/dev/null | grep -E "^mdState=|^mdNumDisks=" | tr "\n" "|")"
+  echo "::SHARES::$(ls /mnt/user/ 2>/dev/null | tr "\n" ",")"
+  echo "::POOLS::$(ls /boot/config/pools/*.cfg 2>/dev/null | xargs -r -I{} basename {} .cfg | tr "\n" ",")"
+
+  if command -v virsh >/dev/null 2>&1; then
+    # name:state per VM (names may contain spaces, states never contain ":").
+    echo "::VMS::$(virsh list --all --name 2>/dev/null | grep -v "^$" | while IFS= read -r vm; do echo "$vm:$(virsh domstate "$vm" 2>/dev/null)"; done | tr "\n" "|")"
+  fi
+
+  echo "::PLUGINS::$(ls /boot/config/plugins/*.plg 2>/dev/null | xargs -r -I{} basename {} .plg | tr "\n" ",")"
+  # User Scripts plugin: one folder per script, optional name and description files.
+  # Emits folder:display-name:description per script.
+  echo "::USERSCRIPTS::$(for d in /boot/config/plugins/user.scripts/scripts/*/; do [ -d "$d" ] || continue; f=$(basename "$d"); n=$(head -c 80 "$d/name" 2>/dev/null | tr -d "\n|:"); printf "%s:%s:%s\n" "$f" "${n:-$f}" "$(head -c 120 "$d/description" 2>/dev/null | tr "\n|" "  ")"; done | tr "\n" "|")"
+  echo "::NETWORK::$(ip -br addr show 2>/dev/null | grep -v "^lo " | awk "{print \$1,\$2,\$3}" | tr "\n" ",")"
+  exit 0
+}
+
+usage() {
+  cat <<'USAGE'
+host-readonly: read-only checks on the Unraid host
+  help | version | scan
+  uptime | free | lsblk | mdstat | sensors | ps
+  df [-h] [/boot | /mnt/<x>[/<y>[/<z>]]]
+  mdcmd status
+  zpool status [-v] [-x] [pool] | zpool list [-v] [pool]
+  zfs list [-r] [-H] [-p] [-t filesystem|volume|snapshot|all] [-o props] [dataset]
+  zfs get [-r] [-H] [-p] <props> [dataset]
+  btrfs filesystem show [/mnt/<x>] | btrfs filesystem usage /mnt/<x>
+  btrfs device stats /mnt/<x> | btrfs scrub status /mnt/<x>
+  smartctl --scan | smartctl -H|-i|-A|-a|-x /dev/<sdX|nvmeN[nM]>
+  ip addr | ip -br addr | ip link | ip -br link | ip route
+  virsh list [--all] | virsh dominfo <vm-name-without-spaces>
+  syslog [lines, 1-5000, default 200]
+USAGE
+  exit 0
+}
+
+[ ${#request} -le 512 ] || refuse "request too long"
+if [[ $request =~ [^A-Za-z0-9\ _./:=,@+-] ]]; then
+  refuse "characters outside [A-Za-z0-9 _./:=,@+-]"
+fi
+read -r -a w <<< "$request"
+[ ${#w[@]} -le 12 ] || refuse "too many arguments"
+[ ${#w[@]} -ge 1 ] || usage
+n=${#w[@]}
+a1=${w[1]:-}
+
+case "${w[0]}" in
+  help) usage ;;
+  version)
+    if $print; then echo version; exit 0; fi
+    echo "$VERSION"; exit 0 ;;
+  scan) [ "$n" -eq 1 ] || refuse "scan takes no arguments"; scan ;;
+  uptime) [ "$n" -eq 1 ] || refuse "uptime takes no arguments"; run uptime ;;
+  free)
+    if [ "$n" -eq 1 ] || { [ "$n" -eq 2 ] && [ "$a1" = -h ]; }; then run free -h; fi
+    refuse "free [-h]" ;;
+  lsblk) [ "$n" -eq 1 ] || refuse "lsblk takes no arguments"; run lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT,MODEL ;;
+  mdstat) [ "$n" -eq 1 ] || refuse "mdstat takes no arguments"; run cat /proc/mdstat ;;
+  sensors) [ "$n" -eq 1 ] || refuse "sensors takes no arguments"; run sensors ;;
+  ps) [ "$n" -eq 1 ] || refuse "ps takes no arguments"; run ps -eo pid,user,pcpu,pmem,etime,comm --sort=-pcpu ;;
+  df)
+    args=(df -h)
+    for x in "${w[@]:1}"; do
+      if [ "$x" = -h ]; then continue
+      elif is_dfpath "$x" && [ ${#args[@]} -eq 2 ]; then args+=("$x")
+      else refuse "df [-h] [/boot | /mnt/...]"; fi
+    done
+    run "${args[@]}" ;;
+  mdcmd)
+    if [ "$n" -eq 2 ] && [ "$a1" = status ]; then run mdcmd status; fi
+    refuse "only 'mdcmd status'" ;;
+  zpool)
+    case "$a1" in
+      status) args=(zpool status); flags='^-(v|x)$' ;;
+      list) args=(zpool list); flags='^-v$' ;;
+      *) refuse "only 'zpool status' and 'zpool list'" ;;
+    esac
+    pool=""
+    for x in "${w[@]:2}"; do
+      if [[ $x =~ $flags ]]; then args+=("$x")
+      elif [ -z "$pool" ] && is_name "$x"; then pool=$x
+      else refuse "zpool $a1: unexpected '$x'"; fi
+    done
+    [ -z "$pool" ] || args+=("$pool")
+    run "${args[@]}" ;;
+  zfs)
+    case "$a1" in
+      list)
+        args=(zfs list); ds=""; i=2
+        while [ "$i" -lt "$n" ]; do
+          x=${w[$i]}
+          case "$x" in
+            -r|-H|-p) args+=("$x") ;;
+            -t) i=$((i + 1)); t=${w[$i]:-}
+                [[ $t =~ ^(filesystem|volume|snapshot|all)$ ]] || refuse "zfs list -t filesystem|volume|snapshot|all"
+                args+=(-t "$t") ;;
+            -o) i=$((i + 1)); p=${w[$i]:-}
+                is_props "$p" || refuse "zfs list -o: property list expected"
+                args+=(-o "$p") ;;
+            *) if [ -z "$ds" ] && is_dataset "$x"; then ds=$x; else refuse "zfs list: unexpected '$x'"; fi ;;
+          esac
+          i=$((i + 1))
+        done
+        [ -z "$ds" ] || args+=("$ds")
+        run "${args[@]}" ;;
+      get)
+        args=(zfs get); props=""; ds=""
+        for x in "${w[@]:2}"; do
+          case "$x" in
+            -r|-H|-p) args+=("$x") ;;
+            *) if [ -z "$props" ] && is_props "$x"; then props=$x
+               elif [ -z "$ds" ] && [ -n "$props" ] && is_dataset "$x"; then ds=$x
+               else refuse "zfs get [-r] [-H] [-p] <props> [dataset]"; fi ;;
+          esac
+        done
+        [ -n "$props" ] || refuse "zfs get needs a property list"
+        args+=("$props")
+        [ -z "$ds" ] || args+=("$ds")
+        run "${args[@]}" ;;
+      *) refuse "only 'zfs list' and 'zfs get'" ;;
+    esac ;;
+  btrfs)
+    [ "$n" -le 4 ] || refuse "btrfs: too many arguments"
+    sub="$a1 ${w[2]:-}"; mnt=${w[3]:-}
+    case "$sub" in
+      "filesystem show")
+        if [ -z "$mnt" ]; then run btrfs filesystem show; fi
+        is_mnt "$mnt" || refuse "btrfs filesystem show [/mnt/<x>]"
+        run btrfs filesystem show "$mnt" ;;
+      "filesystem usage"|"device stats"|"scrub status")
+        is_mnt "$mnt" || refuse "btrfs $sub /mnt/<x>"
+        run btrfs "$a1" "${w[2]}" "$mnt" ;;
+      *) refuse "btrfs: only filesystem show/usage, device stats, scrub status" ;;
+    esac ;;
+  smartctl)
+    if [ "$n" -eq 2 ] && [ "$a1" = --scan ]; then run smartctl --scan; fi
+    if [ "$n" -eq 3 ] && [[ $a1 =~ ^-(H|i|A|a|x)$ ]] && is_device "${w[2]}"; then
+      run smartctl "$a1" "${w[2]}"
+    fi
+    refuse "smartctl --scan | smartctl -H|-i|-A|-a|-x /dev/<disk>" ;;
+  ip)
+    case "${w[*]:1}" in
+      addr|"-br addr"|link|"-br link"|route) run ip "${w[@]:1}" ;;
+      *) refuse "ip addr | ip -br addr | ip link | ip -br link | ip route" ;;
+    esac ;;
+  virsh)
+    if [ "$a1" = list ] && { [ "$n" -eq 2 ] || { [ "$n" -eq 3 ] && [ "${w[2]}" = --all ]; }; }; then
+      run virsh "${w[@]:1}"
+    fi
+    if [ "$a1" = dominfo ] && [ "$n" -eq 3 ] && is_name "${w[2]}"; then
+      run virsh dominfo "${w[2]}"
+    fi
+    refuse "virsh list [--all] | virsh dominfo <name>" ;;
+  syslog)
+    lines=200
+    if [ "$n" -eq 2 ]; then is_count "$a1" || refuse "syslog [1-5000]"; lines=$a1
+    elif [ "$n" -gt 2 ]; then refuse "syslog [1-5000]"; fi
+    run tail -n "$lines" /var/log/syslog ;;
+  *) refuse "unknown command '${w[0]}'" ;;
+esac

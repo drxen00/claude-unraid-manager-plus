@@ -91,6 +91,28 @@ case "$(unraid-mcp-config /workspace/.mcp.json || echo failed)" in
   *) echo "Warning: Unraid API MCP server could not be configured; see above." ;;
 esac
 
+# ── Read-only host checks over SSH ───────────────────────────────────────────
+# The key is created once and persisted in /root/.ssh. Installing the host side
+# is the user's step (host-readonly-setup prints it); the container never
+# writes to the host. Without the raw socket, `host` goes through this.
+if [ ! -f /root/.ssh/claude-host-readonly ]; then
+  host-readonly-setup --authorized-key >/dev/null 2>&1 \n    || echo "Warning: could not create the SSH key for host checks."
+fi
+if [ "$DOCKER_MODE" != full ]; then
+  if [ -z "${UNRAID_SSH_HOST:-}" ]; then
+    echo "Host checks: not set up. Steps: docker exec -it $(hostname) host-readonly-setup"
+  elif v=$(timeout 15 host version 2>&1); then
+    shipped=$(sed -n 's/^VERSION=//p' /usr/local/share/claude-unraid-manager/host-readonly)
+    if [ "$v" = "$shipped" ]; then
+      echo "Host checks: over SSH to ${UNRAID_SSH_HOST} (host-readonly $v)."
+    else
+      echo "Host checks: the host has host-readonly version $v, this image ships $shipped. Update it: docker exec -it $(hostname) host-readonly-setup"
+    fi
+  else
+    echo "Warning: host checks over SSH to ${UNRAID_SSH_HOST} failed: $v"
+  fi
+fi
+
 # ── Generate / refresh CLAUDE.md ─────────────────────────────────────────────
 /usr/local/bin/generate-claude-md.sh
 
