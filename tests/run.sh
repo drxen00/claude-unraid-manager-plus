@@ -797,6 +797,16 @@ else
   echo "  skip tmux not installed"
 fi
 
+# ── Templates: Unraid turns a value with "|" into a dropdown ─────────────────
+echo "templates"
+for tpl in "$ROOT/unraid-template.xml" "$ROOT/unraid-template-socket-proxy.xml"; do
+  if grep '<Config ' "$tpl" | grep -q '|'; then
+    fail "$(basename "$tpl"): a Config value contains '|' (Unraid would keep only the part before it)"
+  else
+    pass "$(basename "$tpl"): no '|' in Config values"
+  fi
+done
+
 # ── Managed settings ─────────────────────────────────────────────────────────
 echo "managed settings"
 M="$ROOT/managed-settings.json"

@@ -168,8 +168,9 @@ pinned by digest, configured entirely by `unraid-template-socket-proxy.xml`:
   template defines it and checks every allowed and refused call above against
   a real Docker daemon in CI, then that nothing changed.
 
-To widen it (for example to allow `docker pull`), edit the *Allowed …*
-variables in the claude-docker-proxy template. They are the boundary: anything
+To widen it (for example to allow `docker pull`), edit the *Allow …*
+variables in the claude-docker-proxy template (one rule each; Unraid cannot
+store a value containing "|", so rules are never combined with it). They are the boundary: anything
 you add there, Claude can do without a way around it, and anything else it
 cannot.
 
