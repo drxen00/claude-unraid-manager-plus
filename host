@@ -38,7 +38,7 @@ fi
 # SSH to host-readonly on the Unraid host, which sshd runs for this key
 # whatever is asked: only its fixed read-only checks work (`host help`).
 if [ "$("$(dirname "$0")/docker-mode")" != full ]; then
-  key="${HOME:-/root}/.ssh/claude-host-readonly"
+  key="${CLAUDE_HOME:-$HOME}/.ssh/claude-host-readonly"
   if [ -z "${UNRAID_SSH_HOST:-}" ] || [ ! -f "$key" ]; then
     echo "host: not available. Behind the socket proxy, host commands go over SSH to the" >&2
     echo "host: read-only checks on the Unraid host, and those are not set up yet." >&2
@@ -54,7 +54,7 @@ if [ "$("$(dirname "$0")/docker-mode")" != full ]; then
   done
   exec ssh -T -i "$key" -p "${UNRAID_SSH_PORT:-22}" \
     -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=5 -o LogLevel=ERROR \
-    -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="${HOME:-/root}/.ssh/known_hosts_unraid" \
+    -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="${CLAUDE_HOME:-$HOME}/.ssh/known_hosts_unraid" \
     "root@${UNRAID_SSH_HOST}" -- "$*"
 fi
 

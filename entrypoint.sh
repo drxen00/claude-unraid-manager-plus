@@ -1,49 +1,57 @@
 #!/bin/bash
+# entrypoint.sh — runs as root, prepares the container, then starts Claude in
+# tmux as the unprivileged user $CLAUDE_USER (uid 99). Everything that
+# enforces policy stays root-owned: /etc/claude-code (managed settings and MCP
+# config), the guard, and the Unraid API key file.
 set -euo pipefail
 
 SESSION="${TMUX_SESSION:-main}"
 RC_NAME="${REMOTE_CONTROL_NAME:-$(hostname)}"
 CONTINUE="${CONTINUE:-true}"
+CLAUDE_USER="${CLAUDE_USER:-claude}"
+CLAUDE_HOME="${CLAUDE_HOME:-/home/claude}"
 export HOST_HELPER_IMAGE="${HOST_HELPER_IMAGE:-alpine:3.21}"
 
-# ── Seed dotfiles into the persisted home on first run ───────────────────────
-[ -f /root/.tmux.conf ] || cp /usr/local/share/claude-unraid-manager/tmux.conf /root/.tmux.conf
+# Run a command as Claude's user. The Unraid API key is dropped from the
+# environment: only the MCP server needs it, and it reads it from a file.
+as_claude() {
+  runuser -u "$CLAUDE_USER" -- env -u UNRAID_API_KEY \
+    HOME="$CLAUDE_HOME" USER="$CLAUDE_USER" LOGNAME="$CLAUDE_USER" "$@"
+}
 
-# Seed default settings (manual permission mode, read-only allow list, deny
-# list, guard hook). First run: copy. Later runs: keep the user's file; when
-# the shipped settings gained keys since the install was last brought up to
-# date (version stamp), merge them underneath the user's keys once. A key the
-# user removes afterwards stays removed.
-SETTINGS_DEFAULT=/usr/local/share/claude-unraid-manager/settings.json
-SETTINGS=/root/.claude/settings.json
-SETTINGS_STAMP=/root/.claude/.claude-unraid-manager-settings-version
-SETTINGS_VERSION=4   # bump whenever settings.json gains keys existing installs should receive
-mkdir -p /root/.claude
-stamp=$(cat "$SETTINGS_STAMP" 2>/dev/null || true)
-case "$stamp" in ''|*[!0-9]*) stamp=0 ;; esac
-if [ ! -f "$SETTINGS" ]; then
-  cp "$SETTINGS_DEFAULT" "$SETTINGS"
-  echo "$SETTINGS_VERSION" > "$SETTINGS_STAMP"
-elif [ "$stamp" -lt "$SETTINGS_VERSION" ]; then
-  if claude-settings-merge "$SETTINGS_DEFAULT" "$SETTINGS" > "$SETTINGS.merged" 2>/dev/null; then
-    cp "$SETTINGS" "$SETTINGS.bak"
-    mv "$SETTINGS.merged" "$SETTINGS"
-    echo "$SETTINGS_VERSION" > "$SETTINGS_STAMP"
-    echo "settings.json: merged in the shipped defaults (guard hook, permission mode, deny list) underneath your settings (backup: settings.json.bak)."
-    missing=$(claude-settings-merge --missing-allow "$SETTINGS_DEFAULT" "$SETTINGS" 2>/dev/null | tr '\n' ' ')
-    [ -z "$missing" ] || echo "settings.json: your allow list was left as is; shipped read-only entries it does not have: $missing"
-  else
-    rm -f "$SETTINGS.merged"
-    echo "Warning: settings.json is not valid JSON; the shipped defaults (guard hook, permission mode) were not merged in."
+# ── Home and workspace belong to Claude's user ───────────────────────────────
+# Bind mounts arrive owned by whoever created them; fix that once, recursively,
+# only when the top directory is not ours yet.
+for d in "$CLAUDE_HOME" /workspace; do
+  mkdir -p "$d"
+  if [ "$(stat -c %u "$d")" != "$(id -u "$CLAUDE_USER")" ]; then
+    chown -R "$CLAUDE_USER":"$(id -g "$CLAUDE_USER")" "$d"
   fi
-fi
+done
+[ -f "$CLAUDE_HOME/.tmux.conf" ] || as_claude cp /usr/local/share/claude-unraid-manager/tmux.conf "$CLAUDE_HOME/.tmux.conf"
+as_claude mkdir -p "$CLAUDE_HOME/.claude"
 
 # Fix SSH key permissions (bind-mount may loosen them)
-if [ -d /root/.ssh ]; then
-  chmod 700 /root/.ssh 2>/dev/null || true
-  find /root/.ssh -type f -name 'id_*' ! -name '*.pub' -exec chmod 600 {} + 2>/dev/null || true
-  chmod 644 /root/.ssh/*.pub 2>/dev/null || true
-  chmod 600 /root/.ssh/config /root/.ssh/known_hosts 2>/dev/null || true
+if [ -d "$CLAUDE_HOME/.ssh" ]; then
+  chmod 700 "$CLAUDE_HOME/.ssh" 2>/dev/null || true
+  find "$CLAUDE_HOME/.ssh" -type f ! -name '*.pub' ! -name 'known_hosts*' -exec chmod 600 {} + 2>/dev/null || true
+  chown -R "$CLAUDE_USER":"$(id -g "$CLAUDE_USER")" "$CLAUDE_HOME/.ssh" 2>/dev/null || true
+fi
+
+# ── Appdata location check ───────────────────────────────────────────────────
+# Unraid creates a new share when a template points at a /mnt/user/<x> that
+# does not exist. If this container's data lives on a different user share
+# than Docker's appdata path (Settings → Docker), that is the likely cause.
+if [ -r /host/boot/config/docker.cfg ]; then
+  docker_appdata=$(sed -n 's/^DOCKER_APP_CONFIG_PATH="\(.*\)"$/\1/p' /host/boot/config/docker.cfg)
+  home_share=$(awk -v mp="$CLAUDE_HOME" '$5 == mp { for (i = 7; i <= NF; i++) if ($i == "-") { if ($(i + 1) == "fuse.shfs") print $4; exit } }' /proc/self/mountinfo \
+    | cut -d/ -f2)
+  docker_share=$(printf '%s' "$docker_appdata" | cut -d/ -f4)
+  if [ -n "$home_share" ] && [ -n "$docker_share" ] && [ "$home_share" != "$docker_share" ]; then
+    echo "Warning: this container's data is on the user share '$home_share', but Docker's appdata path is"
+    echo "  $docker_appdata. If you did not create '$home_share' yourself, Unraid created it from the template"
+    echo "  path: point the Data and Workspace paths at $docker_appdata instead."
+  fi
 fi
 
 # ── Docker access ────────────────────────────────────────────────────────────
@@ -62,7 +70,11 @@ case "${DOCKER_HOST:-}" in
     fi ;;
 esac
 case "$DOCKER_MODE" in
-  proxy) echo "Docker: through the socket proxy (${DOCKER_HOST#unix://}). host commands are unavailable." ;;
+  proxy)
+    echo "Docker: through the socket proxy (${DOCKER_HOST#unix://})."
+    as_claude docker version >/dev/null 2>&1 \
+      || echo "Warning: Claude's user cannot use the proxy socket. In claude-docker-proxy set the socket mode to 0660 and ExtraParams --user 0:100."
+    ;;
   full)
     echo "Docker: raw socket mounted. This container is root-equivalent on the host."
     [ -z "${DOCKER_HOST:-}" ] || echo "Warning: DOCKER_HOST is set, but with the raw socket mounted the proxy is no boundary."
@@ -82,27 +94,31 @@ if [ "$DOCKER_MODE" = full ]; then
 fi
 
 # ── Unraid API MCP server ────────────────────────────────────────────────────
-# Written into the workspace's .mcp.json on every start; enabled for Claude
-# Code by enabledMcpjsonServers in settings.json. The key stays in the
-# environment, the file only references it.
-case "$(unraid-mcp-config /workspace/.mcp.json || echo failed)" in
+# Managed MCP config: Claude Code loads only the servers in this root-owned
+# file, so Claude can neither change this one nor add others. An empty map
+# when the API is not configured. The key goes into a root-owned file that
+# only the MCP server (group of Claude's user) reads.
+MANAGED_MCP=/etc/claude-code/managed-mcp.json
+[ -s "$MANAGED_MCP" ] || printf '{"mcpServers": {}}\n' > "$MANAGED_MCP"
+case "$(unraid-mcp-config "$MANAGED_MCP" || echo failed)" in
   configured) echo "Unraid API: read-only MCP server configured (${UNRAID_API_URL})." ;;
   not-configured) echo "Unraid API: not configured (set Unraid API URL and Key in the template)." ;;
   *) echo "Warning: Unraid API MCP server could not be configured; see above." ;;
 esac
+chmod 0644 "$MANAGED_MCP"
 
 # ── Read-only host checks over SSH ───────────────────────────────────────────
-# The key is created once and persisted in /root/.ssh. Installing the host side
-# is the user's step (host-readonly-setup prints it); the container never
+# The key is created once and persisted in Claude's home. Installing the host
+# side is the user's step (host-readonly-setup prints it); the container never
 # writes to the host. Without the raw socket, `host` goes through this.
-if [ ! -f /root/.ssh/claude-host-readonly ]; then
-  host-readonly-setup --authorized-key >/dev/null 2>&1 \
+if [ ! -f "$CLAUDE_HOME/.ssh/claude-host-readonly" ]; then
+  as_claude host-readonly-setup --authorized-key >/dev/null 2>&1 \
     || echo "Warning: could not create the SSH key for host checks."
 fi
 if [ "$DOCKER_MODE" != full ]; then
   if [ -z "${UNRAID_SSH_HOST:-}" ]; then
     echo "Host checks: not set up. Steps: docker exec -it $(hostname) host-readonly-setup"
-  elif v=$(timeout 15 host version 2>&1); then
+  elif v=$(as_claude timeout 15 host version 2>&1); then
     shipped=$(sed -n 's/^VERSION=//p' /usr/local/share/claude-unraid-manager/host-readonly)
     if [ "$v" = "$shipped" ]; then
       echo "Host checks: over SSH to ${UNRAID_SSH_HOST} (host-readonly $v)."
@@ -115,7 +131,10 @@ if [ "$DOCKER_MODE" != full ]; then
 fi
 
 # ── Generate / refresh CLAUDE.md ─────────────────────────────────────────────
+# As root: it reads the flash drive, which only root may read. The result
+# belongs to Claude's user, so the Custom section stays editable.
 /usr/local/bin/generate-claude-md.sh
+chown "$CLAUDE_USER":"$(id -g "$CLAUDE_USER")" /workspace/CLAUDE.md
 
 # ── Build the claude launch arguments ────────────────────────────────────────
 ARGS=()
@@ -130,35 +149,35 @@ elif [ -n "$RC_NAME" ] && [ "$RC_NAME" != "off" ]; then
   REMOTE_CONTROL=true
 fi
 
-# ── Start tmux with Claude inside ────────────────────────────────────────────
+# ── Start tmux with Claude inside, as Claude's user ──────────────────────────
 # "=" makes tmux match the session name exactly instead of by prefix. For
 # pane targets (send-keys) the session must end with ":" or tmux reads the
 # whole string as a pane name.
-if ! tmux has-session -t "=$SESSION" 2>/dev/null; then
-  tmux new-session -d -s "$SESSION" -c /workspace
+if ! as_claude tmux has-session -t "=$SESSION" 2>/dev/null; then
+  as_claude tmux new-session -d -s "$SESSION" -c /workspace
   # Small delay so tmux is fully ready before sending keys
   sleep 0.3
   # claude-session restarts claude if it exits; %q keeps names with spaces intact.
-  tmux send-keys -t "=$SESSION:" "clear; $(printf '%q ' claude-session "${ARGS[@]}")" C-m
+  as_claude tmux send-keys -t "=$SESSION:" "clear; $(printf '%q ' claude-session "${ARGS[@]}")" C-m
 fi
 
-echo "Claude Unraid Manager is running."
-echo "  Attach: docker exec -it \$(hostname) tmux attach -t $SESSION"
+echo "Claude Unraid Manager is running (Claude as user $CLAUDE_USER, not root)."
+echo "  Attach: docker exec -it \$(hostname) bash"
 if [ "$REMOTE_CONTROL" = true ]; then
   echo "  Remote: open the Claude app and look for '$RC_NAME'"
 else
   echo "  Remote: Remote Control is disabled"
 fi
 # A claude.ai login leaves .credentials.json and an oauthAccount entry in .claude.json.
-if [ -z "${ANTHROPIC_API_KEY:-}" ] && [ ! -f /root/.claude/.credentials.json ] \
-   && ! grep -qs oauthAccount /root/.claude.json; then
+if [ -z "${ANTHROPIC_API_KEY:-}" ] && [ ! -f "$CLAUDE_HOME/.claude/.credentials.json" ] \
+   && ! grep -qs oauthAccount "$CLAUDE_HOME/.claude.json"; then
   echo "  Login:  not logged in yet — attach and complete the login once"
 fi
 
 # Keep the container alive without burning CPU. On stop, end the tmux server
 # first so Claude shuts down cleanly instead of being killed with the container.
 shutdown() {
-  tmux kill-server 2>/dev/null || true
+  as_claude tmux kill-server 2>/dev/null || true
   exit 0
 }
 trap shutdown TERM INT

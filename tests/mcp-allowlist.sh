@@ -28,7 +28,12 @@ else
   fail "config entry: $entry"
 fi
 tools=$(printf '%s' "$entry" | jq -r '.mcpServers.unraid.env.UNRAID_RMCP_ENABLED_TOOLS')
-if printf '%s' "$entry" | grep -q dummy; then fail "API key written to .mcp.json"; else pass "API key not written to .mcp.json"; fi
+if [ "$(printf '%s' "$tools" | tr ',' '\n' | sed 's/^/unraid_/' | sort)" = "$expected" ]; then
+  pass "the image enables exactly the shipped action list"
+else
+  fail "enabled actions in the image: $tools"
+fi
+if printf '%s' "$entry" | grep -q dummy; then fail "API key in the MCP config"; else pass "API key not in the MCP config"; fi
 
 requests() {
   local init='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"acceptance","version":"0"}}}'
@@ -43,10 +48,20 @@ requests() {
   sleep 3
 }
 
-out=$(requests | docker run --rm -i \
-  -e UNRAID_API_URL=http://127.0.0.1:9/graphql -e UNRAID_API_KEY=dummy \
-  -e UNRAID_RMCP_PROJECTION=atomic -e UNRAID_RMCP_ENABLED_TOOLS="$tools" \
-  --entrypoint /usr/local/bin/runraid "$IMAGE" mcp 2>/tmp/runraid.stderr)
+# The server as Claude Code starts it: config written as root by
+# unraid-mcp-config, then runraid as Claude's user with exactly the entry's
+# environment and without UNRAID_API_KEY, so the key must come from the
+# root-owned .env. Same container, so the .env from the config step is there.
+run_server() {
+  docker run --rm -i -e UNRAID_API_URL=http://127.0.0.1:9/graphql -e UNRAID_API_KEY=dummy \
+    -e WITH_ENV_FILE="$1" "$IMAGE" bash -c '
+      unraid-mcp-config /tmp/m.json >/dev/null || exit 1
+      [ "$WITH_ENV_FILE" = yes ] || rm -f /run/claude-unraid/.env
+      mapfile -t vars < <(jq -r ".mcpServers.unraid.env | to_entries[] | \"\(.key)=\(.value)\"" /tmp/m.json)
+      exec runuser -u claude -- env -u UNRAID_API_KEY -u UNRAID_API_URL HOME=/home/claude "${vars[@]}" \
+        "$(jq -r .mcpServers.unraid.command /tmp/m.json)" mcp'
+}
+out=$(requests | run_server yes 2>/tmp/runraid.stderr)
 resp() { printf '%s\n' "$out" | jq -c --argjson id "$1" 'select(.id == $id)' 2>/dev/null | head -1; }
 
 if [ -n "$(resp 1)" ] && resp 1 | jq -e '.result' >/dev/null; then
@@ -79,6 +94,15 @@ rejected "array stop (atomic tool)" 3
 rejected "array stop (legacy tool)" 4
 rejected "docker stop (atomic tool)" 5
 rejected "api_keys read (not in the list)" 6
+
+# Without the .env the server has no key and must not come up: proof that
+# the run above got its key from the file, as Claude's user.
+nokey=$(requests | run_server no 2>/dev/null)
+if printf '%s\n' "$nokey" | jq -e 'select(.id == 1) | .result' >/dev/null 2>&1; then
+  fail "server started without the key file (key came from somewhere else)"
+else
+  pass "no key file, no server: the key came from the root-owned .env"
+fi
 
 if [ "$FAIL" -ne 0 ]; then
   echo "mcp allowlist: FAILED"

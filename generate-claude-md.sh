@@ -47,7 +47,7 @@ HOST_RO="$SHARE/host-readonly"
 host_scan() {
   if [ "$DOCKER_MODE" = full ]; then
     host bash -s -- scan < "$HOST_RO"
-  elif [ -n "${UNRAID_SSH_HOST:-}" ] && [ -f "${HOME:-/root}/.ssh/claude-host-readonly" ]; then
+  elif [ -n "${UNRAID_SSH_HOST:-}" ] && [ -f "${CLAUDE_HOME:-$HOME}/.ssh/claude-host-readonly" ]; then
     host scan
   else
     return 3
@@ -328,7 +328,7 @@ list_containers() {
     awk -v ro="$RO_RE" '{
       mp = $5
       if (mp == "/" || mp ~ "^/(proc|sys|dev)(/|$)" || mp ~ "^/etc/(hosts|hostname|resolv\\.conf)$" ||
-          mp == "/root" || mp ~ "^/root/" || mp == "/workspace" || mp ~ "docker\\.sock$" ||
+          mp == "/root" || mp ~ "^/root/" || mp == "/home/claude" || mp ~ "^/home/claude/" || mp == "/workspace" || mp ~ "docker\\.sock$" ||
           mp == "/run/docker-proxy") next
       print mp, (($6 ~ ro || $NF ~ ro) ? "read-only" : "read-write")
     }' "$MOUNTINFO" 2>/dev/null | tac | awk '!seen[$1]++' | LC_ALL=C sort \
@@ -356,7 +356,7 @@ list_containers() {
   fi
   echo "If the user wants you to work with one, do not guess at its contents. Tell them how to add it:"
   echo "Docker tab → this container → Edit → *Add another Path* → Host path \`/mnt/user/<share>\`,"
-  echo "Container path \`/<share>\` (any name outside \`/root\`), Access Mode read-only unless you must change files → Apply."
+  echo "Container path \`/<share>\` (any name outside \`/home/claude\`), Access Mode read-only unless you must change files → Apply."
   echo "The container restarts and the path shows up in this table."
 
   # ── Boot access ────────────────────────────────────────────────────────────

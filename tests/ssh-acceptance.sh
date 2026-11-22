@@ -30,13 +30,15 @@ trap cleanup EXIT
 cleanup
 docker network create "$NET" >/dev/null
 docker volume create "$HOMEVOL" >/dev/null
+# A fresh volume is root-owned; the entrypoint would hand it to Claude's user.
+docker run --rm -v "$HOMEVOL:/home/claude" "$IMAGE" chown 99:100 /home/claude
 
-# The manager image, with its persisted home on a volume, on the same network.
+# The manager image as Claude runs in it: user 99:100, home on a volume.
 mgr() {
-  docker run --rm -i --network "$NET" -v "$HOMEVOL:/root" -e UNRAID_SSH_HOST="$SSHD" \
-    "$IMAGE" bash -c "$1"
+  docker run --rm -i --network "$NET" --user 99:100 -e HOME=/home/claude \
+    -v "$HOMEVOL:/home/claude" -e UNRAID_SSH_HOST="$SSHD" "$IMAGE" bash -c "$1"
 }
-KEYOPTS='-i /root/.ssh/claude-host-readonly -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/root/.ssh/known_hosts_unraid -o ConnectTimeout=5 -o LogLevel=ERROR'
+KEYOPTS='-i /home/claude/.ssh/claude-host-readonly -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/home/claude/.ssh/known_hosts_unraid -o ConnectTimeout=5 -o LogLevel=ERROR'
 
 echo "ssh: setup as printed by host-readonly-setup"
 line=$(mgr 'host-readonly-setup --authorized-key')
@@ -115,7 +117,7 @@ if docker exec "$SSHD" test -e /tmp/canary; then fail "a refused command ran on 
 echo "ssh: CLAUDE.md behind the proxy, scan over SSH"
 # docker-mode only needs a socket at DOCKER_HOST to report "proxy"; the
 # runner's daemon stands in for the proxy here.
-out=$(docker run --rm --network "$NET" -v "$HOMEVOL:/root" -e UNRAID_SSH_HOST="$SSHD" \
+out=$(docker run --rm --network "$NET" --user 99:100 -e HOME=/home/claude -v "$HOMEVOL:/home/claude" -e UNRAID_SSH_HOST="$SSHD" \
   -v /var/run/docker.sock:/run/docker-proxy/docker.sock -e DOCKER_HOST=unix:///run/docker-proxy/docker.sock \
   "$IMAGE" bash -c 'generate-claude-md.sh >/dev/null && cat /workspace/CLAUDE.md' 2>&1)
 if printf '%s' "$out" | grep -q 'through the socket proxy'; then pass "proxy mode"; else fail "not in proxy mode"; fi

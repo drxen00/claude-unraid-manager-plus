@@ -176,6 +176,20 @@ else
   fail "docker ps from the manager: $out"
 fi
 if [ "$(mgr docker-mode)" = proxy ]; then pass "docker-mode: proxy"; else fail "docker-mode in the manager"; fi
+# Claude runs as uid 99, gid 100: the socket (0660, group 100) must let it in,
+# and must not let in a user outside that group.
+as_uid() {
+  raw run --rm --user "$1" -v "$SOCKDIR:/run/docker-proxy:ro" \
+    -e DOCKER_HOST=unix:///run/docker-proxy/docker.sock --entrypoint docker "$IMAGE" ps -a --format '{{.Names}}'
+}
+if out=$(as_uid 99:100 2>&1) && printf '%s' "$out" | grep -q "$TARGET"; then
+  pass "Claude's user (99:100) reaches the proxy"
+else
+  fail "Claude's user and the proxy socket: $out"
+fi
+if out=$(as_uid 1000:1000 2>&1); then fail "a user outside group 100 reached the proxy: $out"; else pass "a user outside group 100 is refused by the socket mode"; fi
+mode=$(stat -c '%a %g' "$SOCKDIR/docker.sock")
+if [ "$mode" = "660 100" ]; then pass "proxy socket 0660, group 100"; else fail "proxy socket mode/group: $mode"; fi
 out=$(mgr 'host uptime; echo "status=$?"' 2>&1)
 case "$out" in *"status=69"*) pass "host refused with 69" ;; *) fail "host: $out" ;; esac
 if out=$(mgr 'generate-claude-md.sh >/dev/null && cat /workspace/CLAUDE.md' 2>&1); then

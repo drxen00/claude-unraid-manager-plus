@@ -3,7 +3,7 @@
 # A fake `docker` on PATH answers the host scan and `docker ps`.
 set -euo pipefail
 # A DOCKER_HOST from the calling shell would switch the scripts to proxy mode.
-unset DOCKER_HOST UNRAID_API_URL UNRAID_API_KEY UNRAID_API_CA_BUNDLE UNRAID_MCP_TOOLS UNRAID_SSH_HOST UNRAID_SSH_PORT SSH_ORIGINAL_COMMAND
+unset DOCKER_HOST UNRAID_API_URL UNRAID_API_KEY UNRAID_API_CA_BUNDLE UNRAID_MCP_TOOLS UNRAID_SSH_HOST UNRAID_SSH_PORT SSH_ORIGINAL_COMMAND CLAUDE_HOME CLAUDE_USER
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 TMP=$(mktemp -d)
@@ -119,6 +119,7 @@ cat > "$TMP/mountinfo" <<'EOF'
 105 100 0:60 /containers/abc/hosts /etc/hosts rw,relatime - xfs /dev/sdb1 rw
 106 100 0:60 /containers/abc/resolv.conf /etc/resolv.conf rw,relatime - xfs /dev/sdb1 rw
 107 100 0:61 /appdata/claude-unraid-manager/home /root rw,relatime - fuse.shfs shfs rw
+120 100 0:61 /appdata/claude-unraid-manager/home /home/claude rw,relatime - fuse.shfs shfs rw
 108 100 0:61 /appdata/claude-unraid-manager/workspace /workspace rw,relatime - fuse.shfs shfs rw
 109 100 0:21 /docker.sock /var/run/docker.sock rw,nosuid - tmpfs tmpfs rw
 110 100 8:1 /boot /host/boot ro,relatime - vfat /dev/sda1 ro
@@ -194,7 +195,7 @@ expect_contains "$TMP/CLAUDE.md" "| \`/mnt\` | read-write |"               # sub
 expect_not_contains "$TMP/CLAUDE.md" "| \`/mnt/disk1\` |"
 expect_not_contains "$TMP/CLAUDE.md" "| \`/mnt/cache\` |"
 expect_contains "$TMP/CLAUDE.md" "| \`/run/scans\` | read-write |"         # /run is not a system prefix
-for sys in /root /workspace /etc/hosts /proc /var/run/docker.sock; do
+for sys in /root /home/claude /workspace /etc/hosts /proc /var/run/docker.sock; do
   expect_not_contains "$TMP/CLAUDE.md" "| \`$sys\` |"
 done
 expect_contains "$TMP/CLAUDE.md" "Add another Path"
@@ -331,6 +332,12 @@ expect_blocked 'host dd of=/dev/nvme0n1 if=image.img'
 expect_blocked 'host sgdisk --zap-all /dev/sdb'
 expect_blocked 'host sgdisk -Z /dev/sdb'
 expect_blocked 'host zpool destroy tank'
+expect_blocked 'host mdcmd stop'
+expect_blocked 'host /usr/local/sbin/mdcmd clear'
+expect_blocked 'host sh -c "mdcmd import"'
+expect_blocked 'host emcmd cmdStop=Stop'
+expect_blocked 'host emcmd "cmdFormat=Format&confirmFormat=OFF"'
+expect_blocked 'host emcmd cmdNewConfig=apply'
 expect_blocked 'rm -rf /'
 expect_blocked 'rm -rf /*'
 expect_blocked 'rm -rf -- /mnt/user'
@@ -671,15 +678,16 @@ refused_hr "$(printf 'uptime\tid')"
 refused_hr "uptime $(head -c 600 /dev/zero | tr '\0' a)"
 
 echo "unraid-mcp-config"
-mc() { env -u UNRAID_API_URL -u UNRAID_API_KEY UNRAID_MCP_TOOLS_FILE="$ROOT/unraid-mcp-tools" "$@" bash "$ROOT/unraid-mcp-config" "$TMP/mcp.json"; }
-rm -f "$TMP/mcp.json"
-printf '{"mcpServers":{"other":{"command":"x"}}}
-' > "$TMP/mcp.json"
+mc() { env -u UNRAID_API_URL -u UNRAID_API_KEY UNRAID_MCP_TOOLS_FILE="$ROOT/unraid-mcp-tools" UNRAID_MCP_HOME="$TMP/mcphome" UNRAID_MCP_GROUP="$(id -g)" "$@" bash "$ROOT/unraid-mcp-config" "$TMP/mcp.json"; }
+rm -rf "$TMP/mcp.json" "$TMP/mcphome"
+printf '{"mcpServers":{"other":{"command":"x"}}}\n' > "$TMP/mcp.json"
 if [ "$(mc UNRAID_API_URL=http://192.0.2.1/graphql UNRAID_API_KEY=secret-key-value)" = configured ]; then pass "mcp: configured"; else fail "mcp: not configured"; fi
 if jq -e '.mcpServers.other.command == "x"' "$TMP/mcp.json" >/dev/null; then pass "mcp: other servers kept"; else fail "mcp: other server lost"; fi
-if grep -q secret-key-value "$TMP/mcp.json"; then fail "mcp: key written to disk"; else pass "mcp: key not written to disk"; fi
-# shellcheck disable=SC2016
-if jq -e '.mcpServers.unraid.env.UNRAID_API_KEY == "${UNRAID_API_KEY}"' "$TMP/mcp.json" >/dev/null; then pass "mcp: key referenced from the environment"; else fail "mcp: key reference"; fi
+if grep -q secret-key-value "$TMP/mcp.json"; then fail "mcp: key in the MCP config"; else pass "mcp: key not in the MCP config"; fi
+if jq -e '.mcpServers.unraid.env | has("UNRAID_API_KEY") | not' "$TMP/mcp.json" >/dev/null; then pass "mcp: no key variable in the entry"; else fail "mcp: key variable in the entry"; fi
+if [ "$(cat "$TMP/mcphome/.env")" = "UNRAID_API_KEY=secret-key-value" ]; then pass "mcp: key in the .env file"; else fail "mcp: .env content"; fi
+if [ "$(stat -c %a "$TMP/mcphome/.env")" = 640 ] && [ "$(stat -c %a "$TMP/mcphome")" = 750 ]; then pass "mcp: .env 0640, directory 0750"; else fail "mcp: modes $(stat -c %a "$TMP/mcphome" "$TMP/mcphome/.env" | tr '\n' ' ')"; fi
+if jq -e --arg h "$TMP/mcphome" '.mcpServers.unraid.env.UNRAID_HOME == $h and .mcpServers.unraid.env.UNRAID_API_URL == "http://192.0.2.1/graphql"' "$TMP/mcp.json" >/dev/null; then pass "mcp: UNRAID_HOME and URL in the entry"; else fail "mcp: entry env"; fi
 if jq -e '.mcpServers.unraid.env.UNRAID_RMCP_PROJECTION == "atomic" and .mcpServers.unraid.args == ["mcp"]' "$TMP/mcp.json" >/dev/null; then pass "mcp: stdio, atomic"; else fail "mcp: transport/projection"; fi
 tools=$(jq -r '.mcpServers.unraid.env.UNRAID_RMCP_ENABLED_TOOLS' "$TMP/mcp.json")
 case ",$tools," in *,array,*) pass "mcp: read actions enabled" ;; *) fail "mcp: tools: $tools" ;; esac
@@ -689,8 +697,14 @@ mc UNRAID_API_URL=https://192.0.2.1/graphql UNRAID_API_KEY=k UNRAID_API_CA_BUNDL
 if jq -e '.mcpServers.unraid.env.UNRAID_API_CA_BUNDLE == "/certs/unraid.pem"' "$TMP/mcp.json" >/dev/null; then pass "mcp: CA bundle passed"; else fail "mcp: CA bundle missing"; fi
 mc UNRAID_API_URL=http://192.0.2.1/graphql UNRAID_API_KEY=k UNRAID_MCP_TOOLS="array, disks" >/dev/null
 if jq -e '.mcpServers.unraid.env.UNRAID_RMCP_ENABLED_TOOLS == "array,disks"' "$TMP/mcp.json" >/dev/null; then pass "mcp: UNRAID_MCP_TOOLS overrides"; else fail "mcp: override"; fi
+set +e
+mc UNRAID_API_URL=http://192.0.2.1/graphql 'UNRAID_API_KEY=bad"key' >/dev/null 2>&1
+status=$?
+set -e
+if [ "$status" -ne 0 ]; then pass "mcp: key with a quote rejected"; else fail "mcp: quoted key accepted"; fi
 if [ "$(mc)" = not-configured ]; then pass "mcp: not configured without key"; else fail "mcp: unconfigured output"; fi
 if jq -e '(.mcpServers | has("unraid") | not) and .mcpServers.other.command == "x"' "$TMP/mcp.json" >/dev/null; then pass "mcp: entry removed, others kept"; else fail "mcp: removal"; fi
+if [ ! -e "$TMP/mcphome/.env" ]; then pass "mcp: key file removed"; else fail "mcp: key file left behind"; fi
 printf 'not json' > "$TMP/mcp.json"
 set +e
 mc UNRAID_API_URL=http://192.0.2.1/graphql UNRAID_API_KEY=k >/dev/null 2>&1
@@ -699,6 +713,8 @@ set -e
 if [ "$status" -ne 0 ] && [ "$(cat "$TMP/mcp.json")" = "not json" ]; then pass "mcp: invalid file left alone"; else fail "mcp: invalid file handling"; fi
 
 echo "guard: still silent for everyday commands"
+expect_allowed 'host mdcmd status'
+expect_allowed 'host mdcmd nocheck'
 expect_allowed 'logs plex'
 expect_allowed 'docker logs --tail 100 plex'
 expect_allowed 'host rsync -a /mnt/user/a/ /mnt/user/b/'
@@ -781,44 +797,21 @@ else
   echo "  skip tmux not installed"
 fi
 
-# ── Settings merge ───────────────────────────────────────────────────────────
-echo "settings merge"
-DEFAULTS="$ROOT/settings.json"
-merge() { bash "$ROOT/claude-settings-merge" "$DEFAULTS" "$1"; }
-has_guard() { jq -e '[.hooks.PreToolUse[].hooks[].command] | index("/usr/local/bin/claude-guard") != null' "$1" >/dev/null; }
-
-# Initial-release file: permissions only, no hooks.
-cat > "$TMP/old.json" <<'EOF'
-{ "permissions": { "deny": ["Bash(rm -rf /)", "Bash(mdcmd delete*)"] } }
-EOF
-merge "$TMP/old.json" > "$TMP/merged1.json"
-if has_guard "$TMP/merged1.json"; then pass "guard added to hook-less file"; else fail "guard missing after merge"; fi
-if jq -e '.permissions.deny | (index("Bash(mdcmd delete*)") != null) and (index("Bash(mkfs*)") != null)' "$TMP/merged1.json" >/dev/null; then pass "user deny entries kept, shipped ones added"; else fail "deny list not unioned"; fi
-if jq -e '.permissions.disableBypassPermissionsMode == "disable"' "$TMP/merged1.json" >/dev/null; then pass "bypass disabled added"; else fail "bypass setting missing"; fi
-
-# User already has their own PreToolUse hook: it must survive, guard appended.
-cat > "$TMP/own-hook.json" <<'EOF'
-{ "hooks": { "PreToolUse": [ { "matcher": "Bash", "hooks": [ { "type": "command", "command": "/usr/local/bin/notify" } ] } ] } }
-EOF
-merge "$TMP/own-hook.json" > "$TMP/merged2.json"
-if has_guard "$TMP/merged2.json"; then pass "guard appended next to user hook"; else fail "guard missing with user hook"; fi
-if jq -e '[.hooks.PreToolUse[].hooks[].command] | index("/usr/local/bin/notify") != null' "$TMP/merged2.json" >/dev/null; then pass "user hook kept"; else fail "user hook lost"; fi
-
-# An install from beta.1/beta.2 has the guard but no defaultMode: the merge adds it.
-cat > "$TMP/beta2.json" <<'EOF'
-{ "permissions": { "allow": ["Bash(docker ps *)"], "disableBypassPermissionsMode": "disable" },
-  "hooks": { "PreToolUse": [ { "matcher": "Bash", "hooks": [ { "type": "command", "command": "/usr/local/bin/claude-guard" } ] } ] } }
-EOF
-merge "$TMP/beta2.json" > "$TMP/merged4.json"
-if jq -e '.permissions.defaultMode == "default"' "$TMP/merged4.json" >/dev/null; then pass "defaultMode added to older install"; else fail "defaultMode missing after merge"; fi
-if jq -e '.permissions.allow == ["Bash(docker ps *)"]' "$TMP/merged4.json" >/dev/null; then pass "user allow list left as is"; else fail "user allow list changed"; fi
-missing=$(bash "$ROOT/claude-settings-merge" --missing-allow "$DEFAULTS" "$TMP/beta2.json")
-if printf '%s\n' "$missing" | grep -qx 'Bash(logs \*)'; then pass "--missing-allow reports shipped entries the user lacks"; else fail "--missing-allow output wrong: $missing"; fi
-if [ "$(jq '[.hooks.PreToolUse[].hooks[].command] | map(select(. == "/usr/local/bin/claude-guard")) | length' "$TMP/merged4.json")" = 1 ]; then pass "guard not duplicated"; else fail "guard duplicated"; fi
-
-# Idempotent: merging the output again changes nothing.
-merge "$TMP/merged2.json" > "$TMP/merged3.json"
-if [ "$(jq -S . "$TMP/merged2.json")" = "$(jq -S . "$TMP/merged3.json")" ]; then pass "merge is idempotent"; else fail "merge not idempotent"; fi
+# ── Managed settings ─────────────────────────────────────────────────────────
+echo "managed settings"
+M="$ROOT/managed-settings.json"
+mjq() { if jq -e "$1" "$M" >/dev/null; then pass "managed: $2"; else fail "managed: $2"; fi; }
+mjq '.permissions.defaultMode == "default"' "starts in Manual mode"
+mjq '.permissions.disableBypassPermissionsMode == "disable"' "bypass mode disabled"
+mjq '.disableAutoMode == "disable" and .permissions.disableAutoMode == "disable"' "auto mode disabled"
+mjq '.allowManagedPermissionRulesOnly == true' "only managed permission rules count"
+mjq '.allowManagedHooksOnly == true' "only managed hooks run"
+mjq '[.hooks.PreToolUse[].hooks[].command] | index("/usr/local/bin/claude-guard") != null' "guard hook"
+mjq '[.hooks.PreToolUse[].hooks[] | select(.command == "/usr/local/bin/claude-guard") | .onFailure] == ["block"]' "guard fails closed"
+mjq '.permissions.deny | index("Bash(mkfs*)") != null' "deny list"
+mjq '.permissions.allow | index("mcp__unraid") != null' "Unraid MCP tools allowed"
+mjq '.permissions.allow | (index("Bash(docker logs *)") == null and index("Bash(docker inspect *)") == null)' "raw logs and inspect prompt"
+mjq 'has("enabledMcpjsonServers") | not' "no project MCP approval (managed-mcp.json instead)"
 
 if [ "$FAIL" = 0 ]; then
   echo "all tests passed"

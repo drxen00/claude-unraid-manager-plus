@@ -2,11 +2,10 @@
   "permissions": {
     "defaultMode": "default",
     "disableBypassPermissionsMode": "disable",
+    "disableAutoMode": "disable",
     "allow": [
       "Bash(docker ps *)",
-      "Bash(docker logs *)",
       "Bash(logs *)",
-      "Bash(docker inspect *)",
       "Bash(docker images *)",
       "Bash(docker stats --no-stream *)",
       "Bash(docker top *)",
@@ -44,9 +43,9 @@
       "Bash(shred *)"
     ]
   },
-  "enabledMcpjsonServers": [
-    "unraid"
-  ],
+  "disableAutoMode": "disable",
+  "allowManagedPermissionRulesOnly": true,
+  "allowManagedHooksOnly": true,
   "hooks": {
     "PreToolUse": [
       {
