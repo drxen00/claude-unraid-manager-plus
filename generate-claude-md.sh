@@ -244,7 +244,8 @@ list_containers() {
         }'
         echo ""
       elif [ -n "$POOLS" ]; then
-        pool_paths=$(printf '%s\n' "$POOLS" | sed 's/, /\n/g' | sed 's|.*|`/mnt/&`|' | paste -sd, - | sed 's/,/, /g')
+        bt='`'
+        pool_paths=$(printf '%s\n' "$POOLS" | sed 's/, /\n/g' | sed "s|.*|${bt}/mnt/&${bt}|" | paste -sd, - | sed 's/,/, /g')
         echo "**Pools** (from \`/boot/config/pools/\`): ${POOLS} — mounted at ${pool_paths}"
         echo ""
       fi
