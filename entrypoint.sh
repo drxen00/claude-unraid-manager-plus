@@ -12,10 +12,11 @@ CLAUDE_USER="${CLAUDE_USER:-claude}"
 CLAUDE_HOME="${CLAUDE_HOME:-/home/claude}"
 export HOST_HELPER_IMAGE="${HOST_HELPER_IMAGE:-alpine:3.21}"
 
-# Run a command as Claude's user. The Unraid API key is dropped from the
-# environment: only the MCP server needs it, and it reads it from a file.
+# Run a command as Claude's user. The Unraid API key and the Discord bot token
+# are dropped from the environment: the MCP server reads the key from a file,
+# and only the watcher (root) uses the token.
 as_claude() {
-  runuser -u "$CLAUDE_USER" -- env -u UNRAID_API_KEY \
+  runuser -u "$CLAUDE_USER" -- env -u UNRAID_API_KEY -u DISCORD_BOT_TOKEN \
     HOME="$CLAUDE_HOME" USER="$CLAUDE_USER" LOGNAME="$CLAUDE_USER" "$@"
 }
 
@@ -159,6 +160,37 @@ if ! as_claude tmux has-session -t "=$SESSION" 2>/dev/null; then
   sleep 0.3
   # claude-session restarts claude if it exits; %q keeps names with spaces intact.
   as_claude tmux send-keys -t "=$SESSION:" "clear; $(printf '%q ' claude-session "${ARGS[@]}")" C-m
+fi
+
+# ── Discord watcher ──────────────────────────────────────────────────────────
+# Runs as root so Claude's user cannot read its bot token. It checks the
+# server without AI, asks Claude (claude -p, as Claude's user, read-only by the
+# managed settings) to explain problems, and sends everything to the owner's
+# Discord DM. Its buttons can only start, stop or restart a container.
+WATCH_DIR=/usr/local/share/claude-unraid-manager/watcher
+if [ -n "${DISCORD_BOT_TOKEN:-}" ]; then
+  if ! [[ "${DISCORD_USER_ID:-}" =~ ^[0-9]{17,20}$ ]]; then
+    echo "Discord: bot token is set, but 'Discord user ID' is empty or not a number. Watcher not started."
+  else
+    mkdir -p /workspace/watch
+    chown "$CLAUDE_USER":"$(id -g "$CLAUDE_USER")" /workspace/watch
+    (
+      if [ -n "${UNRAID_API_CA_BUNDLE:-}" ]; then export NODE_EXTRA_CA_CERTS="$UNRAID_API_CA_BUNDLE"; fi
+      while true; do
+        rc=0
+        "$WATCH_DIR/node" "$WATCH_DIR/src/main.mjs" || rc=$?
+        if [ "$rc" = 2 ]; then
+          echo "Discord watcher: configuration error (see above), not restarting."
+          break
+        fi
+        echo "Discord watcher stopped (exit $rc); restarting in 30 s."
+        sleep 30
+      done
+    ) &
+    echo "Discord: watcher running; reports go to your Discord DMs (morning report: ${REPORT_TIME:-08:00})."
+  fi
+else
+  echo "Discord: not set up. Add a bot token and your Discord user ID in the template to get reports."
 fi
 
 echo "Claude Unraid Manager is running (Claude as user $CLAUDE_USER, not root)."

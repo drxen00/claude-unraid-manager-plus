@@ -65,6 +65,7 @@ to investigate and, ideally after you confirm, to fix things.
 - **Safe defaults** — boot drive read-only, no shares mounted, bridge networking. The user opts in to more access
 - **Guard hook** — a short list of catastrophic commands (`mkfs`, `wipefs`, writing to a disk, `zpool destroy`, `rm -rf` on a mount root) is blocked by a text match on the whole command, whichever wrapper is used (`host`, `sh -c`, absolute paths); a second list (downloads piped to a shell, network tools, deletes, flash-drive writes) always asks you first, with a reason, in any permission mode. A safety net, not a wall; see [Defense in Depth](#defense-in-depth) and [Prompt injection](#prompt-injection)
 - **Remote Control** — reach your Claude session from phone or tablet via the Claude app
+- **Discord watcher** (optional) — a morning report and alerts in your Discord DMs, explained by Claude in plain English, with buttons to start, stop or restart a container. See [docs/discord.md](docs/discord.md)
 - **Persistent sessions** — tmux keeps the session alive across disconnects; Claude is restarted if it exits; `--continue` resumes the last conversation
 - **GUI-aware** — Claude is instructed to create dockerMan templates for new containers, respect Unraid's persistence model, and keep changes manageable through the web UI. Instructions, not guarantees
 - **Multi-filesystem** — detects ZFS pools, btrfs pools, XFS, and the classic Unraid parity array; only ZFS pool-only setups have been verified so far
@@ -253,6 +254,35 @@ container never writes to the host for this. To undo, delete the line.
 Not yet checked on a real Unraid server: that `/root/.ssh` survives reboots
 there (it points to `/boot/config/ssh/root` on Unraid 6.9 and later), and the
 output of each check on Unraid's own tools.
+
+### Discord watcher
+
+Optional, off until a bot token and your Discord user ID are set; setup in
+[docs/discord.md](docs/discord.md). A small Node.js service (`watcher/`) runs
+in the container as root, so Claude's user cannot read its token:
+
+- **Checks without AI** every `CHECK_INTERVAL` minutes: containers through the
+  socket proxy (crashed, restarting, unhealthy, out of memory), array state and
+  disk fill through the read-only host checks, and unread Unraid warnings and
+  alerts through the read-only API key. Each problem is reported once, again
+  only if it gets worse, and cleared after two clean checks.
+- **Claude explains, read-only.** For new problems, the morning report and your
+  questions it runs `claude -p` as Claude's user. Nobody can approve anything
+  in such a run, so every tool outside the managed allow list is refused: in
+  practice Docker reads, the `logs` wrapper, host checks and the Unraid MCP.
+- **Buttons, not commands.** Claude may suggest `container.restart`, `.start`
+  or `.stop` for a named container in a fixed JSON block. The watcher keeps
+  only those, for containers that exist (never its own two), and shows them as
+  buttons. A click runs a fixed `docker <verb> <name>` through the proxy, only
+  for your Discord account, once, within 15 minutes, at most 5 an hour, after
+  re-checking the container's state; each click is logged (`unraid-watch
+  audit:`).
+- **Why not the official Discord channel plugin?** Plugin MCP servers are not
+  loaded while `/etc/claude-code/managed-mcp.json` is in place, and that file
+  is what keeps Claude's MCP servers to the read-only Unraid one. The watcher
+  keeps that lock and gets the same result with a smaller surface.
+- **Known gap:** `docker inspect` on this container shows its environment,
+  token included. Claude could post as the bot; it cannot press your buttons.
 
 ## Access Control
 
@@ -447,6 +477,12 @@ The `## Custom` section at the bottom of the generated `CLAUDE.md` is yours. Add
 | `CLAUDE_LANG` | *(empty)* | Response language (e.g. `de`, `fr`, `es`). Empty = English |
 | `ANTHROPIC_API_KEY` | *(empty)* | Optional. Bill usage to a Claude Console API key instead of logging in. Disables Remote Control |
 | `HOST_HELPER_IMAGE` | `alpine:3.21` | Image for the helper container behind `host`. Pulled on start |
+| `DISCORD_BOT_TOKEN` | *(empty)* | Turns on the Discord watcher ([docs/discord.md](docs/discord.md)) |
+| `DISCORD_USER_ID` | *(empty)* | Your numeric Discord user ID; the only account the bot talks to |
+| `REPORT_TIME` | `08:00` | Morning report, HH:MM in `TZ`; `off` disables it |
+| `CHECK_INTERVAL` | `15` | Minutes between checks (5 to 240) |
+| `DISK_WARN_PERCENT` | `90` | Warn when a disk or pool is this full; 98% and more is critical |
+| `WATCH_IGNORE` | *(empty)* | Comma-separated containers the watcher never alerts on |
 
 ### A note on appdata
 
