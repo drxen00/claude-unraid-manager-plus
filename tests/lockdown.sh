@@ -44,8 +44,16 @@ if in_c 'pgrep -u 0 -x claude' >/dev/null 2>&1; then fail "a claude process runs
 tmux_users=$(in_c "ps -eo user:20,args | awk '\$2 ~ /^tmux/ {print \$1}' | sort -u | tr '\n' ' '")
 if [ "$tmux_users" = "claude " ]; then pass "tmux runs as claude only"; else fail "tmux process owners: '$tmux_users'"; in_c 'ps -eo user:20,pid,args' | grep -i tmux; fi
 # shellcheck disable=SC2016 # expanded inside the container, not here
+# Root in `docker exec` has no CAP_SYS_PTRACE, so it may not read another
+# user's /proc/<pid>/environ; read it as Claude's user. If the claude binary
+# marks itself non-dumpable, fall back to its parent, the claude-session
+# shell that hands it the environment unchanged.
 pid=$(in_c 'pgrep -u 99 -x claude | head -1')
-envs=$(in_c "tr '\\0' '\\n' < /proc/$pid/environ" 2>&1)
+envs=$(as_claude "tr '\\0' '\\n' < /proc/$pid/environ" 2>/dev/null)
+if [ -z "$envs" ]; then
+  pid=$(in_c "ps -o ppid= -p $pid | tr -d ' '")
+  envs=$(as_claude "tr '\\0' '\\n' < /proc/$pid/environ" 2>&1)
+fi
 if [ -z "$envs" ] || ! printf '%s\n' "$envs" | grep -q '^PATH='; then
   fail "could not read Claude's environment (pid '$pid'): $(printf '%s' "$envs" | head -c 300)"
 else
