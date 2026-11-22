@@ -19,18 +19,21 @@ TPL="$ROOT/unraid-template-socket-proxy.xml"
 RAW=/var/run/docker.sock
 PROXY=cum-acc-proxy
 TARGET=cum-acc-target
+SUDO=; [ "$(id -u)" -eq 0 ] || SUDO=sudo
 SOCKDIR=$(mktemp -d)
-# The proxy runs as uid 0 without capabilities, so it cannot write into a
-# directory another user owns. On Unraid dockerd creates the bind directory
-# as root; here it belongs to the CI user.
-chmod 777 "$SOCKDIR"
+# Recreate the bind directory as Unraid does: owned by nobody:users (99:100),
+# mode 0755 (seen on Unraid 7.4). The proxy runs as uid 0 and needs
+# DAC_OVERRIDE to create its socket there; without it, bind fails with
+# "permission denied". Do not loosen this to 0777, which hid that bug.
+$SUDO chown 99:100 "$SOCKDIR"
+$SUDO chmod 0755 "$SOCKDIR"
 
 FAIL=0
 pass() { echo "  ok   $1"; }
 fail() { echo "  FAIL $1"; FAIL=1; }
 raw() { env -u DOCKER_HOST docker "$@"; }
-# Client side: the manager image's own Docker CLI, as root (the filtered
-# socket is 0600 root), through the same read-only mount the template uses.
+# Client side: the manager image's own Docker CLI, as root, through the same
+# read-only mount the template uses.
 proxy() {
   raw run --rm -i -v "$SOCKDIR:/run/docker-proxy:ro" \
     -e DOCKER_HOST=unix:///run/docker-proxy/docker.sock --entrypoint docker "$IMAGE" "$@"
@@ -40,7 +43,7 @@ cleanup() {
   raw rm -f "$PROXY" "$TARGET" >/dev/null 2>&1
   raw volume rm cum-acc-vol >/dev/null 2>&1
   raw network rm cum-acc-net >/dev/null 2>&1
-  rm -rf "$SOCKDIR"
+  $SUDO rm -rf "$SOCKDIR"
 }
 trap cleanup EXIT
 
