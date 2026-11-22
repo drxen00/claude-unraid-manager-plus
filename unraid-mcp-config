@@ -1,0 +1,68 @@
+#!/bin/bash
+# unraid-mcp-config <path/to/.mcp.json>
+#
+# Adds, refreshes or removes the "unraid" entry in a project .mcp.json, run on
+# every container start. Other MCP servers in the file are kept.
+#
+#   UNRAID_API_URL and UNRAID_API_KEY set  → entry written, prints "configured"
+#   either missing                         → entry removed, prints "not-configured"
+#
+# The key is never written to the file: the entry references ${UNRAID_API_KEY}
+# and Claude Code expands it from the environment when it starts the server.
+# The server is runraid (Rust, stdio, no listening port) with the atomic
+# projection and only the actions in unraid-mcp-tools enabled, unless
+# UNRAID_MCP_TOOLS overrides the list.
+#
+# Test overrides: UNRAID_MCP_TOOLS_FILE, UNRAID_MCP_BIN.
+set -euo pipefail
+
+dest=${1:?usage: unraid-mcp-config <path/to/.mcp.json>}
+tools_file=${UNRAID_MCP_TOOLS_FILE:-/usr/local/share/claude-unraid-manager/unraid-mcp-tools}
+bin=${UNRAID_MCP_BIN:-/usr/local/bin/runraid}
+
+current='{}'
+if [ -s "$dest" ]; then
+  if ! current=$(jq -e 'if type == "object" then . else error("not an object") end' "$dest" 2>/dev/null); then
+    echo "unraid-mcp-config: $dest is not a JSON object; left unchanged, Unraid MCP not configured." >&2
+    exit 1
+  fi
+fi
+
+write() {
+  printf '%s\n' "$1" > "$dest.tmp"
+  mv "$dest.tmp" "$dest"
+}
+
+if [ -z "${UNRAID_API_URL:-}" ] || [ -z "${UNRAID_API_KEY:-}" ]; then
+  if [ "$(jq '(.mcpServers // {}) | has("unraid")' <<< "$current")" = true ]; then
+    write "$(jq 'del(.mcpServers.unraid)' <<< "$current")"
+  fi
+  echo not-configured
+  exit 0
+fi
+
+if [ -n "${UNRAID_MCP_TOOLS:-}" ]; then
+  tools=$(printf '%s' "$UNRAID_MCP_TOOLS" | tr -d ' \t\n')
+else
+  tools=$(sed -e 's/#.*//' -e 's/[[:space:]]//g' "$tools_file" | sed '/^$/d' | paste -sd, -)
+fi
+if [ -z "$tools" ]; then
+  echo "unraid-mcp-config: no actions to enable; Unraid MCP not configured." >&2
+  exit 1
+fi
+
+# "${...}" below is literal text for Claude Code to expand, not shell syntax.
+# shellcheck disable=SC2016
+write "$(jq --arg bin "$bin" --arg tools "$tools" --arg ca "${UNRAID_API_CA_BUNDLE:-}" '
+  .mcpServers.unraid = {
+    type: "stdio",
+    command: $bin,
+    args: ["mcp"],
+    env: ({
+      UNRAID_API_URL: "${UNRAID_API_URL}",
+      UNRAID_API_KEY: "${UNRAID_API_KEY}",
+      UNRAID_RMCP_PROJECTION: "atomic",
+      UNRAID_RMCP_ENABLED_TOOLS: $tools
+    } + (if $ca != "" then {UNRAID_API_CA_BUNDLE: $ca} else {} end))
+  }' <<< "$current")"
+echo configured

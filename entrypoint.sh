@@ -17,7 +17,7 @@ export HOST_HELPER_IMAGE="${HOST_HELPER_IMAGE:-alpine:3.21}"
 SETTINGS_DEFAULT=/usr/local/share/claude-unraid-manager/settings.json
 SETTINGS=/root/.claude/settings.json
 SETTINGS_STAMP=/root/.claude/.claude-unraid-manager-settings-version
-SETTINGS_VERSION=3   # bump whenever settings.json gains keys existing installs should receive
+SETTINGS_VERSION=4   # bump whenever settings.json gains keys existing installs should receive
 mkdir -p /root/.claude
 stamp=$(cat "$SETTINGS_STAMP" 2>/dev/null || true)
 case "$stamp" in ''|*[!0-9]*) stamp=0 ;; esac
@@ -80,6 +80,16 @@ if [ "$DOCKER_MODE" = full ]; then
       || echo "Warning: could not pull $HOST_HELPER_IMAGE within 60 s — the first host command will pull it instead."
   fi
 fi
+
+# ── Unraid API MCP server ────────────────────────────────────────────────────
+# Written into the workspace's .mcp.json on every start; enabled for Claude
+# Code by enabledMcpjsonServers in settings.json. The key stays in the
+# environment, the file only references it.
+case "$(unraid-mcp-config /workspace/.mcp.json || echo failed)" in
+  configured) echo "Unraid API: read-only MCP server configured (${UNRAID_API_URL})." ;;
+  not-configured) echo "Unraid API: not configured (set Unraid API URL and Key in the template)." ;;
+  *) echo "Warning: Unraid API MCP server could not be configured; see above." ;;
+esac
 
 # ── Generate / refresh CLAUDE.md ─────────────────────────────────────────────
 /usr/local/bin/generate-claude-md.sh
