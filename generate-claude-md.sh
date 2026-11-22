@@ -37,44 +37,31 @@ Respond in ${CLAUDE_LANG}. Use English for technical terms (Docker, ZFS, contain
 EOF
 fi
 
-# ── Host scan script ─────────────────────────────────────────────────────────
-# Runs on the Unraid host through the `host` wrapper (nsenter into PID 1), so
-# every command below is the host's own binary (GNU grep, zpool, mdcmd, ...).
-# One ::KEY::value line per item. Values that span several lines are joined
-# with "|" so the whole value stays on its ::KEY:: line; lists use ",".
-read -r -d '' SCAN_SCRIPT <<'EOF' || true
-echo "::VERSION::$(grep -oP "(?<=version=\")[^\"]+" /etc/unraid-version 2>/dev/null)"
-echo "::HOSTNAME::$(hostname)"
-echo "::CPU::$(grep -m1 "model name" /proc/cpuinfo 2>/dev/null | cut -d: -f2 | xargs)"
-echo "::RAM::$(free -h 2>/dev/null | awk "/Mem:/{print \$2}")"
-echo "::UPTIME::$(uptime -p 2>/dev/null || uptime | sed "s/.*up /up /" | sed "s/,.*load.*//")"
-echo "::NETNS::$(readlink /proc/self/ns/net 2>/dev/null)"
-
-if command -v zpool >/dev/null 2>&1; then
-  echo "::ZFS_POOLS::$(zpool list -Ho name,size,alloc,free,health 2>/dev/null | tr "\n" "|")"
-  echo "::ZFS_DATASETS::$(zfs list -Ho name,used,avail,mountpoint 2>/dev/null | head -30 | tr "\n" "|")"
-  # -t: snapshots inherit the property and would be listed too.
-  echo "::ZFS_ENCRYPTED::$(zfs get -Ho name,value encryption -t filesystem,volume 2>/dev/null | grep -v "off$" | awk "{print \$1}" | tr "\n" ",")"
-fi
-if command -v btrfs >/dev/null 2>&1; then
-  # Full output incl. device lines; loop-backed images are filtered out later.
-  echo "::BTRFS::$(btrfs filesystem show 2>/dev/null | tr "\n" "|")"
-fi
-echo "::ARRAY_STATE::$(mdcmd status 2>/dev/null | grep -E "^mdState=|^mdNumDisks=" | tr "\n" "|")"
-echo "::SHARES::$(ls /mnt/user/ 2>/dev/null | tr "\n" ",")"
-echo "::POOLS::$(ls /boot/config/pools/*.cfg 2>/dev/null | xargs -r -I{} basename {} .cfg | tr "\n" ",")"
-
-if command -v virsh >/dev/null 2>&1; then
-  # name:state per VM (names may contain spaces, states never contain ":").
-  echo "::VMS::$(virsh list --all --name 2>/dev/null | grep -v "^$" | while IFS= read -r vm; do echo "$vm:$(virsh domstate "$vm" 2>/dev/null)"; done | tr "\n" "|")"
-fi
-
-echo "::PLUGINS::$(ls /boot/config/plugins/*.plg 2>/dev/null | xargs -r -I{} basename {} .plg | tr "\n" ",")"
-# User Scripts plugin: one folder per script, optional name and description files.
-# Emits folder:display-name:description per script.
-echo "::USERSCRIPTS::$(for d in /boot/config/plugins/user.scripts/scripts/*/; do [ -d "$d" ] || continue; f=$(basename "$d"); n=$(head -c 80 "$d/name" 2>/dev/null | tr -d "\n|:"); printf "%s:%s:%s\n" "$f" "${n:-$f}" "$(head -c 120 "$d/description" 2>/dev/null | tr "\n|" "  ")"; done | tr "\n" "|")"
-echo "::NETWORK::$(ip -br addr show 2>/dev/null | grep -v "^lo " | awk "{print \$1,\$2,\$3}" | tr "\n" ",")"
-EOF
+# ── Host scan ────────────────────────────────────────────────────────────────
+# The scan itself lives in host-readonly ("scan"), so one fixed script runs on
+# the host in both modes: with the raw socket through the privileged helper
+# (script on stdin), behind the socket proxy over SSH, where the copy the user
+# installed on the flash drive answers. One ::KEY::value line per item; values
+# that span several lines are joined with "|", lists use ",".
+HOST_RO="$SHARE/host-readonly"
+host_scan() {
+  if [ "$DOCKER_MODE" = full ]; then
+    host bash -s -- scan < "$HOST_RO"
+  elif [ -n "${UNRAID_SSH_HOST:-}" ] && [ -f "${HOME:-/root}/.ssh/claude-host-readonly" ]; then
+    host scan
+  else
+    return 3
+  fi
+}
+scan_note() {
+  if [ "$1" = 3 ]; then
+    echo "_Host checks are not set up (behind the socket proxy they run over SSH), so system, storage, VM and plugin details are missing. The user sets them up with \`docker exec -it $(hostname) host-readonly-setup\`._"
+  elif [ "$DOCKER_MODE" = full ]; then
+    echo "_Host scan failed (helper image not available or Docker unreachable), so system, storage, VM and plugin details are missing. Restart the container to retry, or run \`host uptime\` to check._"
+  else
+    echo "_Host scan over SSH failed, so system, storage, VM and plugin details are missing. Run \`host version\` to see why (SSH off, key not installed, or wrong UNRAID_SSH_HOST)._"
+  fi
+}
 
 SCAN=""
 # First line of a ::KEY:: entry (values never contain newlines, see above).
@@ -108,18 +95,19 @@ list_containers() {
   echo "_Auto-generated on $(date '+%Y-%m-%d %H:%M'). Do not edit — this section is refreshed on every container start._"
   echo ""
 
-  if [ "$DOCKER_MODE" = proxy ]; then
-    cat "$SNIP/docker-proxy.md"
-    echo ""
-    list_containers
-  elif [ "$DOCKER_MODE" = full ]; then
-    cat "$SNIP/docker-socket.md"
+  if [ "$DOCKER_MODE" != none ]; then
+    if [ "$DOCKER_MODE" = proxy ]; then
+      cat "$SNIP/docker-proxy.md"
+    else
+      cat "$SNIP/docker-socket.md"
+    fi
 
-    SCAN=$(host sh -c "$SCAN_SCRIPT" 2>/dev/null) || SCAN=""
+    scan_status=0
+    SCAN=$(host_scan 2>/dev/null) || { scan_status=$?; SCAN=""; }
 
     if [ -z "$SCAN" ]; then
       echo ""
-      echo "_Host scan failed (helper image not available or Docker unreachable), so system, storage, VM and plugin details are missing. Restart the container to retry, or run \`host uptime\` to check._"
+      scan_note "$scan_status"
       echo ""
     else
       VERSION=$(get VERSION)

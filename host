@@ -33,20 +33,30 @@ if [ $# -eq 0 ]; then
   exit 64
 fi
 
-# The helper is a privileged container, so `host` needs the raw socket. Behind
-# the socket proxy, creating containers is refused by design; say so instead
-# of surfacing a bare "Forbidden" from docker run.
-case "$("$(dirname "$0")/docker-mode")" in
-  full) ;;
-  proxy)
-    echo "host: not available. Docker is reached through the socket proxy, which refuses" >&2
-    echo "host: creating containers, and host commands run in a privileged helper container." >&2
-    echo "host: This is the configured boundary, not a fault; do not look for another route." >&2
-    exit 69 ;;
-  *)
-    echo "host: not available. No Docker socket is mounted." >&2
-    exit 69 ;;
-esac
+# With the raw socket, `host` runs anything in a privileged helper container
+# (below). Without it (behind the socket proxy), `host` sends the request over
+# SSH to host-readonly on the Unraid host, which sshd runs for this key
+# whatever is asked: only its fixed read-only checks work (`host help`).
+if [ "$("$(dirname "$0")/docker-mode")" != full ]; then
+  key="${HOME:-/root}/.ssh/claude-host-readonly"
+  if [ -z "${UNRAID_SSH_HOST:-}" ] || [ ! -f "$key" ]; then
+    echo "host: not available. Behind the socket proxy, host commands go over SSH to the" >&2
+    echo "host: read-only checks on the Unraid host, and those are not set up yet." >&2
+    echo "host: The user can set them up: docker exec -it $(hostname) host-readonly-setup" >&2
+    exit 69
+  fi
+  for a in "$@"; do
+    case "$a" in
+      ''|*[[:space:]]*)
+        echo "host: arguments with spaces cannot be passed to the host checks" >&2
+        exit 64 ;;
+    esac
+  done
+  exec ssh -T -i "$key" -p "${UNRAID_SSH_PORT:-22}" \
+    -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=5 -o LogLevel=ERROR \
+    -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="${HOME:-/root}/.ssh/known_hosts_unraid" \
+    "root@${UNRAID_SSH_HOST}" -- "$*"
+fi
 
 if [ "$("$(dirname "$0")/boot-mode")" = "rw" ]; then
   exec docker run --rm -i --privileged --pid=host "$IMAGE" \

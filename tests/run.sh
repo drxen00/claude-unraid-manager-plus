@@ -3,7 +3,7 @@
 # A fake `docker` on PATH answers the host scan and `docker ps`.
 set -euo pipefail
 # A DOCKER_HOST from the calling shell would switch the scripts to proxy mode.
-unset DOCKER_HOST UNRAID_API_URL UNRAID_API_KEY UNRAID_API_CA_BUNDLE UNRAID_MCP_TOOLS
+unset DOCKER_HOST UNRAID_API_URL UNRAID_API_KEY UNRAID_API_CA_BUNDLE UNRAID_MCP_TOOLS UNRAID_SSH_HOST UNRAID_SSH_PORT SSH_ORIGINAL_COMMAND
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 TMP=$(mktemp -d)
@@ -18,6 +18,7 @@ expect_not_contains() { if grep -qF -- "$2" "$1"; then fail "unexpected: $2"; el
 # ── Fixtures ─────────────────────────────────────────────────────────────────
 mkdir -p "$TMP/bin" "$TMP/share"
 cp -r "$ROOT/claude-md" "$TMP/share/"
+cp "$ROOT/host-readonly" "$TMP/share/"
 cp "$ROOT/host" "$ROOT/docker-mode" "$TMP/bin/"
 chmod +x "$TMP/bin/host" "$TMP/bin/docker-mode"
 
@@ -48,6 +49,17 @@ case "${1:-}" in
 esac
 EOF
 chmod +x "$TMP/bin/docker"
+
+# Fake ssh: answers the host scan, echoes everything else.
+cat > "$TMP/bin/ssh" <<'EOF'
+#!/bin/bash
+last=${!#}
+if [ "$last" = scan ]; then cat "$FAKE_SCAN"; else echo "ssh-args: $*"; fi
+EOF
+chmod +x "$TMP/bin/ssh"
+# A home with the host-check key, for the SSH path.
+mkdir -p "$TMP/home/.ssh"
+: > "$TMP/home/.ssh/claude-host-readonly"
 
 # [ -S ] needs a real socket inode; bind() leaves one behind.
 python3 -I - "$TMP/docker.sock" <<'EOF'
@@ -248,6 +260,20 @@ expect_not_contains "$TMP/CLAUDE.md" "No Docker access"
 expect_contains "$TMP/CLAUDE.md" "## Custom"
 expect_contains "$TMP/CLAUDE.md" "Unraid API (not configured)"
 expect_contains "$TMP/CLAUDE.md" "Not the VIEWER or ADMIN role"
+expect_contains "$TMP/CLAUDE.md" "Host checks are not set up"
+
+echo "scanner: socket proxy, host scan over SSH"
+rm -f "$TMP/CLAUDE.md"
+write_scan "net:[1]"
+HOME="$TMP/home" UNRAID_SSH_HOST=192.0.2.5 \
+  DOCKER_SOCK_OVERRIDE="$TMP/does-not-exist" DOCKER_HOST="unix://$TMP/proxy.sock" run_generator
+expect_contains "$TMP/CLAUDE.md" "Docker Access (through the socket proxy)"
+expect_contains "$TMP/CLAUDE.md" "Unraid 7.0.1"
+expect_contains "$TMP/CLAUDE.md" "tank 10.9T 4.2T 6.7T ONLINE"
+expect_contains "$TMP/CLAUDE.md" "- win11 (shut off)"
+expect_contains "$TMP/CLAUDE.md" "- plex (plexinc/pms-docker, Up 3 days)"
+expect_not_contains "$TMP/CLAUDE.md" "Host checks are not set up"
+expect_not_contains "$TMP/CLAUDE.md" "Host scan over SSH failed"
 
 echo "scanner: Unraid API configured"
 rm -f "$TMP/CLAUDE.md"
@@ -548,6 +574,101 @@ set -e
 if [ "$status" -eq 69 ]; then pass "host: exit 69 behind the proxy"; else fail "host: exit $status behind the proxy"; fi
 case "$out" in *"socket proxy"*) pass "host: names the proxy" ;; *) fail "host: message: $out" ;; esac
 case "$out" in *"--privileged"*) fail "host: ran docker behind the proxy" ;; *) pass "host: did not call docker" ;; esac
+
+echo "host over SSH"
+hs() { HOME="$TMP/home" DOCKER_SOCK="$TMP/nope" DOCKER_HOST="unix://$TMP/proxy.sock" PATH="$TMP/bin:$PATH" "$@"; }
+out=$(hs env UNRAID_SSH_HOST=192.0.2.5 bash "$TMP/bin/host" zpool status tank)
+case "$out" in *"root@192.0.2.5 -- zpool status tank"*) pass "host: request sent over SSH" ;; *) fail "host over SSH: $out" ;; esac
+case "$out" in *"-i $TMP/home/.ssh/claude-host-readonly"*) pass "host: dedicated key" ;; *) fail "host: key: $out" ;; esac
+case "$out" in *"BatchMode=yes"*"StrictHostKeyChecking=accept-new"*) pass "host: batch mode, host key pinned on first use" ;; *) fail "host: ssh options: $out" ;; esac
+out=$(hs env UNRAID_SSH_HOST=192.0.2.5 UNRAID_SSH_PORT=2222 bash "$TMP/bin/host" uptime)
+case "$out" in *"-p 2222"*) pass "host: SSH port" ;; *) fail "host: port: $out" ;; esac
+set +e
+hs env UNRAID_SSH_HOST=192.0.2.5 bash "$TMP/bin/host" zpool "status tank" >/dev/null 2>&1
+status=$?
+set -e
+if [ "$status" -eq 64 ]; then pass "host: argument with a space rejected"; else fail "host: space in argument: $status"; fi
+set +e
+out=$(HOME="$TMP/no-home" DOCKER_SOCK="$TMP/nope" DOCKER_HOST="unix://$TMP/proxy.sock" UNRAID_SSH_HOST=192.0.2.5 PATH="$TMP/bin:$PATH" bash "$TMP/bin/host" uptime 2>&1)
+status=$?
+set -e
+if [ "$status" -eq 69 ] && printf '%s' "$out" | grep -q host-readonly-setup; then pass "host: no key, setup hint"; else fail "host: no key: $status $out"; fi
+
+echo "host-readonly: allowed"
+hr() { env -u SSH_ORIGINAL_COMMAND bash "$ROOT/host-readonly" --print "$@"; }
+expect_hr() {
+  local want=$1 out
+  shift
+  out=$(hr "$@" 2>&1)
+  if [ "$out" = "$want" ]; then pass "host-readonly: $*"; else fail "host-readonly: $* -> '$out' (want '$want')"; fi
+}
+expect_hr 'uptime ' uptime
+expect_hr 'free -h ' free
+expect_hr 'free -h ' free -h
+expect_hr 'df -h ' df
+expect_hr 'df -h /mnt/user ' df -h /mnt/user
+expect_hr 'df -h /boot ' df /boot
+expect_hr 'mdcmd status ' mdcmd status
+expect_hr 'zpool status ' zpool status
+expect_hr 'zpool status -v tank ' zpool status -v tank
+expect_hr 'zpool status -x ' zpool status -x
+expect_hr 'zpool list -v ' zpool list -v
+expect_hr 'zfs list -t snapshot -o name,used tank/media ' zfs list -t snapshot -o name,used tank/media
+expect_hr 'zfs list -r -H nvme ' zfs list -r -H nvme
+expect_hr 'zfs get -H encryption nvme/secrets ' zfs get -H encryption nvme/secrets
+expect_hr 'zfs get compression,used ' zfs get compression,used
+expect_hr 'btrfs filesystem show ' btrfs filesystem show
+expect_hr 'btrfs filesystem usage /mnt/cache ' btrfs filesystem usage /mnt/cache
+expect_hr 'btrfs scrub status /mnt/cache ' btrfs scrub status /mnt/cache
+expect_hr 'btrfs device stats /mnt/cache ' btrfs device stats /mnt/cache
+expect_hr 'smartctl --scan ' smartctl --scan
+expect_hr 'smartctl -a /dev/sdb ' smartctl -a /dev/sdb
+expect_hr 'smartctl -H /dev/nvme0n1 ' smartctl -H /dev/nvme0n1
+expect_hr 'ip -br addr ' ip -br addr
+expect_hr 'ip route ' ip route
+expect_hr 'virsh list --all ' virsh list --all
+expect_hr 'virsh dominfo win11 ' virsh dominfo win11
+expect_hr 'tail -n 200 /var/log/syslog ' syslog
+expect_hr 'tail -n 500 /var/log/syslog ' syslog 500
+expect_hr 'cat /proc/mdstat ' mdstat
+expect_hr 'lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT,MODEL ' lsblk
+expect_hr scan scan
+expect_hr version version
+# The production path: the request arrives in SSH_ORIGINAL_COMMAND, not as arguments.
+out=$(SSH_ORIGINAL_COMMAND='zpool status -v tank' bash "$ROOT/host-readonly" --print)
+if [ "$out" = 'zpool status -v tank ' ]; then pass "host-readonly: request from SSH_ORIGINAL_COMMAND"; else fail "SSH_ORIGINAL_COMMAND: '$out'"; fi
+out=$(SSH_ORIGINAL_COMMAND='zpool status' bash "$ROOT/host-readonly" --print rm -rf /)
+if [ "$out" = 'zpool status ' ]; then pass "host-readonly: arguments ignored under ssh"; else fail "arguments under ssh: '$out'"; fi
+out=$(SSH_ORIGINAL_COMMAND='' bash "$ROOT/host-readonly" 2>&1)
+case "$out" in *"read-only checks"*) pass "host-readonly: empty request shows usage" ;; *) fail "empty request: $out" ;; esac
+
+echo "host-readonly: refused"
+refused_hr() {
+  local out st
+  set +e
+  out=$(SSH_ORIGINAL_COMMAND="$1" bash "$ROOT/host-readonly" --print 2>&1)
+  st=$?
+  set -e
+  if [ "$st" -eq 65 ]; then pass "refused: $(printf '%q' "$1")"; else fail "not refused ($st): $(printf '%q' "$1") -> $out"; fi
+}
+# shellcheck disable=SC2016 # the $(...) and backticks are the payload, not to be expanded
+for req in 'rm -rf /' 'touch /tmp/x' 'bash' 'sh -c id' 'cat /etc/shadow' 'sftp' 'internal-sftp' \
+  'zpool destroy tank' 'zpool scrub tank' 'zpool export tank' 'zpool status tank extra' 'zpool status -f' \
+  'zfs destroy tank/media' 'zfs set compression=off tank' 'zfs rollback tank@x' 'zfs list tank/../../etc' \
+  'zfs list -t bogus' 'zfs list -o' 'zfs get' 'zfs list a b' \
+  'zfs list; rm -rf /' 'zfs list && id' 'zfs list | sh' 'uptime $(id)' 'uptime `id`' "uptime 'x'" 'uptime > /boot/x' \
+  'df -h /etc' 'df -h /mnt/../etc' 'df -h /mnt/user /boot' 'df -h /mnt/*' \
+  'smartctl -t long /dev/sda' 'smartctl -s off /dev/sda' 'smartctl -a /etc/shadow' 'smartctl -a /dev/../etc/shadow' 'smartctl -a /dev/sda1x' \
+  'btrfs scrub start /mnt/cache' 'btrfs balance start /mnt/cache' 'btrfs filesystem usage /etc' 'btrfs filesystem usage /mnt/../etc' \
+  'mdcmd stop' 'mdcmd set md_write_method 1' 'mdcmd' 'virsh start win11' 'virsh destroy win11' 'virsh dominfo ../x' \
+  'ip link set eth0 down' 'ip addr add 1.2.3.4/24 dev eth0' 'free -m' 'uptime -s' 'scan now' \
+  'syslog 99999' 'syslog 0' 'syslog -n' 'syslog 10 20' \
+  'a b c d e f g h i j k l m'; do
+  refused_hr "$req"
+done
+refused_hr "$(printf 'uptime\nid')"
+refused_hr "$(printf 'uptime\tid')"
+refused_hr "uptime $(head -c 600 /dev/zero | tr '\0' a)"
 
 echo "unraid-mcp-config"
 mc() { env -u UNRAID_API_URL -u UNRAID_API_KEY UNRAID_MCP_TOOLS_FILE="$ROOT/unraid-mcp-tools" "$@" bash "$ROOT/unraid-mcp-config" "$TMP/mcp.json"; }

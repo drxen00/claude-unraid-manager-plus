@@ -18,7 +18,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: shellcheck
-        run: shellcheck -s bash entrypoint.sh generate-claude-md.sh host boot-mode docker-mode logs claude-guard claude-session claude-settings-merge unraid-mcp-config bashrc tests/run.sh tests/proxy-acceptance.sh tests/mcp-allowlist.sh
+        run: shellcheck -s bash entrypoint.sh generate-claude-md.sh host boot-mode docker-mode logs claude-guard claude-session claude-settings-merge unraid-mcp-config host-readonly host-readonly-setup bashrc tests/run.sh tests/proxy-acceptance.sh tests/mcp-allowlist.sh tests/ssh-acceptance.sh
 
       - name: Scanner and guard tests
         run: bash tests/run.sh
@@ -91,6 +91,11 @@ jobs:
       # the shipped read-only actions are exposed, write actions are refused.
       - name: Unraid MCP allowlist
         run: bash tests/mcp-allowlist.sh claude-unraid-manager:smoke
+
+      # host-readonly on a real OpenSSH server, bound to the image's key as
+      # host-readonly-setup prints it: the checks work, nothing else does.
+      - name: Host checks over SSH
+        run: bash tests/ssh-acceptance.sh claude-unraid-manager:smoke
 
       # Unraid runs on x86-64 only, so a single platform is built.
       - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
