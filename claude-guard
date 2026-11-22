@@ -65,6 +65,8 @@ rules=(
   "writing to a block device|(>>?[[:space:]]*${Q}${BLOCKDEV}|${B}(cp|tee|mv|install)[[:space:]]+${ARGS}${Q}${BLOCKDEV})"
   "sgdisk --zap|${B}sgdisk(.*[[:space:]])(--zap(-all)?|-[[:alpha:]]*[zZ])${T}"
   "zpool destroy/labelclear|${B}zpool[[:space:]]+(destroy|labelclear)${T}"
+  "stopping, clearing or re-importing the Unraid array|${B}mdcmd[[:space:]]+(stop|clear|import)${T}"
+  "stopping, formatting or re-configuring the array through emhttp|${B}emcmd[^;&|]*(cmdStop|cmdFormat|cmdClearStart|cmdNewConfig|cmdInit)"
   "rm on a mount root|${B}rm[[:space:]]+${ARGS}${Q}(${ROOTS}|${DOTDOT})${T}"
 )
 
