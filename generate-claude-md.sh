@@ -302,6 +302,14 @@ list_containers() {
     echo ""
   fi
 
+  # ── Unraid API ──────────────────────────────────────────────────────────────
+  if [ -n "${UNRAID_API_URL:-}" ] && [ -n "${UNRAID_API_KEY:-}" ]; then
+    cat "$SNIP/unraid-api.md"
+  else
+    cat "$SNIP/no-unraid-api.md"
+  fi
+  echo ""
+
   # ── Mount analysis ──────────────────────────────────────────────────────────
   # Every bind mount the user added in the template is listed, whatever the
   # container path is called. System mounts and the container's own data

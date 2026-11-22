@@ -1,0 +1,41 @@
+# Unraid API actions the `unraid` MCP server exposes to Claude: read-only only.
+# One canonical runraid action per line; becomes UNRAID_RMCP_ENABLED_TOOLS.
+# runraid rejects unknown names at start, so a typo fails loudly.
+#
+# Left out on purpose even though they only read: api_keys, api_key, the
+# api_key_*/permission helpers, oidc_*, is_sso_enabled, validate_oidc_session
+# (auth configuration and secrets); vars, config, settings, flash,
+# registration, rclone (configuration that can hold credentials or license
+# data); connect, remote_access, cloud, me, owner, servers (account data);
+# display, customization, public_theme, time_zone_options, is_fresh_install,
+# internal_boot_context, assignable_disks, plugin_install_operation(s) (no
+# admin value). All write actions are left out.
+#
+# Not a boundary on its own: the API key's permissions are. See README,
+# "Unraid API".
+help
+status
+info
+server
+online
+system_time
+metrics
+array
+disks
+disk
+parity_history
+shares
+docker
+docker_logs
+vms
+services
+network
+network_interfaces
+notifications
+log_files
+log_file
+ups
+ups_config
+ups_device_by_id
+plugins
+installed_unraid_plugins

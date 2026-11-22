@@ -31,7 +31,8 @@
       "Bash(host ip -br addr)",
       "Bash(host ip -br addr show)",
       "Bash(host ip route)",
-      "Bash(host ip -br link)"
+      "Bash(host ip -br link)",
+      "mcp__unraid"
     ],
     "deny": [
       "Bash(rm -rf /)",
@@ -43,6 +44,9 @@
       "Bash(shred *)"
     ]
   },
+  "enabledMcpjsonServers": [
+    "unraid"
+  ],
   "hooks": {
     "PreToolUse": [
       {

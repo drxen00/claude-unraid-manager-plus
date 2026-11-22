@@ -3,7 +3,7 @@
 # A fake `docker` on PATH answers the host scan and `docker ps`.
 set -euo pipefail
 # A DOCKER_HOST from the calling shell would switch the scripts to proxy mode.
-unset DOCKER_HOST
+unset DOCKER_HOST UNRAID_API_URL UNRAID_API_KEY UNRAID_API_CA_BUNDLE UNRAID_MCP_TOOLS
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 TMP=$(mktemp -d)
@@ -246,6 +246,16 @@ expect_not_contains "$TMP/CLAUDE.md" "Unraid 7.0.1"
 expect_not_contains "$TMP/CLAUDE.md" "Docker socket is mounted"
 expect_not_contains "$TMP/CLAUDE.md" "No Docker access"
 expect_contains "$TMP/CLAUDE.md" "## Custom"
+expect_contains "$TMP/CLAUDE.md" "Unraid API (not configured)"
+expect_contains "$TMP/CLAUDE.md" "Not the VIEWER or ADMIN role"
+
+echo "scanner: Unraid API configured"
+rm -f "$TMP/CLAUDE.md"
+UNRAID_API_URL=http://192.0.2.1/graphql UNRAID_API_KEY=secret-key-value   DOCKER_SOCK_OVERRIDE="$TMP/does-not-exist" DOCKER_HOST="unix://$TMP/proxy.sock" run_generator
+expect_contains "$TMP/CLAUDE.md" "### Unraid API (read-only)"
+expect_contains "$TMP/CLAUDE.md" "mcp__unraid__unraid_<action>"
+expect_not_contains "$TMP/CLAUDE.md" "Unraid API (not configured)"
+expect_not_contains "$TMP/CLAUDE.md" "secret-key-value"
 
 # ── Scanner: unreadable mountinfo must not truncate the file ─────────────────
 echo "scanner: unreadable mountinfo"
@@ -538,6 +548,34 @@ set -e
 if [ "$status" -eq 69 ]; then pass "host: exit 69 behind the proxy"; else fail "host: exit $status behind the proxy"; fi
 case "$out" in *"socket proxy"*) pass "host: names the proxy" ;; *) fail "host: message: $out" ;; esac
 case "$out" in *"--privileged"*) fail "host: ran docker behind the proxy" ;; *) pass "host: did not call docker" ;; esac
+
+echo "unraid-mcp-config"
+mc() { env -u UNRAID_API_URL -u UNRAID_API_KEY UNRAID_MCP_TOOLS_FILE="$ROOT/unraid-mcp-tools" "$@" bash "$ROOT/unraid-mcp-config" "$TMP/mcp.json"; }
+rm -f "$TMP/mcp.json"
+printf '{"mcpServers":{"other":{"command":"x"}}}
+' > "$TMP/mcp.json"
+if [ "$(mc UNRAID_API_URL=http://192.0.2.1/graphql UNRAID_API_KEY=secret-key-value)" = configured ]; then pass "mcp: configured"; else fail "mcp: not configured"; fi
+if jq -e '.mcpServers.other.command == "x"' "$TMP/mcp.json" >/dev/null; then pass "mcp: other servers kept"; else fail "mcp: other server lost"; fi
+if grep -q secret-key-value "$TMP/mcp.json"; then fail "mcp: key written to disk"; else pass "mcp: key not written to disk"; fi
+# shellcheck disable=SC2016
+if jq -e '.mcpServers.unraid.env.UNRAID_API_KEY == "${UNRAID_API_KEY}"' "$TMP/mcp.json" >/dev/null; then pass "mcp: key referenced from the environment"; else fail "mcp: key reference"; fi
+if jq -e '.mcpServers.unraid.env.UNRAID_RMCP_PROJECTION == "atomic" and .mcpServers.unraid.args == ["mcp"]' "$TMP/mcp.json" >/dev/null; then pass "mcp: stdio, atomic"; else fail "mcp: transport/projection"; fi
+tools=$(jq -r '.mcpServers.unraid.env.UNRAID_RMCP_ENABLED_TOOLS' "$TMP/mcp.json")
+case ",$tools," in *,array,*) pass "mcp: read actions enabled" ;; *) fail "mcp: tools: $tools" ;; esac
+case ",$tools," in *,api_keys,*|*,array_set_state,*|*,docker_stop,*|*,vars,*|*,flash,*|*,#*) fail "mcp: forbidden action or comment in list: $tools" ;; *) pass "mcp: no write or secret-bearing actions" ;; esac
+if jq -e '.mcpServers.unraid.env | has("UNRAID_API_CA_BUNDLE") | not' "$TMP/mcp.json" >/dev/null; then pass "mcp: no CA bundle unless set"; else fail "mcp: CA bundle"; fi
+mc UNRAID_API_URL=https://192.0.2.1/graphql UNRAID_API_KEY=k UNRAID_API_CA_BUNDLE=/certs/unraid.pem >/dev/null
+if jq -e '.mcpServers.unraid.env.UNRAID_API_CA_BUNDLE == "/certs/unraid.pem"' "$TMP/mcp.json" >/dev/null; then pass "mcp: CA bundle passed"; else fail "mcp: CA bundle missing"; fi
+mc UNRAID_API_URL=http://192.0.2.1/graphql UNRAID_API_KEY=k UNRAID_MCP_TOOLS="array, disks" >/dev/null
+if jq -e '.mcpServers.unraid.env.UNRAID_RMCP_ENABLED_TOOLS == "array,disks"' "$TMP/mcp.json" >/dev/null; then pass "mcp: UNRAID_MCP_TOOLS overrides"; else fail "mcp: override"; fi
+if [ "$(mc)" = not-configured ]; then pass "mcp: not configured without key"; else fail "mcp: unconfigured output"; fi
+if jq -e '(.mcpServers | has("unraid") | not) and .mcpServers.other.command == "x"' "$TMP/mcp.json" >/dev/null; then pass "mcp: entry removed, others kept"; else fail "mcp: removal"; fi
+printf 'not json' > "$TMP/mcp.json"
+set +e
+mc UNRAID_API_URL=http://192.0.2.1/graphql UNRAID_API_KEY=k >/dev/null 2>&1
+status=$?
+set -e
+if [ "$status" -ne 0 ] && [ "$(cat "$TMP/mcp.json")" = "not json" ]; then pass "mcp: invalid file left alone"; else fail "mcp: invalid file handling"; fi
 
 echo "guard: still silent for everyday commands"
 expect_allowed 'logs plex'
