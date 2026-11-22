@@ -18,7 +18,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: shellcheck
-        run: shellcheck -s bash entrypoint.sh generate-claude-md.sh host boot-mode docker-mode logs claude-guard claude-session claude-settings-merge unraid-mcp-config host-readonly host-readonly-setup bashrc tests/run.sh tests/proxy-acceptance.sh tests/mcp-allowlist.sh tests/ssh-acceptance.sh
+        run: shellcheck -s bash entrypoint.sh generate-claude-md.sh host boot-mode docker-mode logs claude-guard claude-session unraid-mcp-config host-readonly host-readonly-setup bashrc tests/run.sh tests/proxy-acceptance.sh tests/mcp-allowlist.sh tests/ssh-acceptance.sh tests/lockdown.sh
 
       - name: Scanner and guard tests
         run: bash tests/run.sh
@@ -77,7 +77,7 @@ jobs:
           # With a read-write /host/boot (fixture mountinfo) the same command must ask, proving the mountinfo check works inside the image.
           docker run --rm -e MOUNTINFO=/tmp/mi claude-unraid-manager:smoke bash -c 'printf "1 0 8:1 /boot /host/boot rw,relatime - vfat /dev/sda1 rw\n" > /tmp/mi; echo "{\"tool_input\":{\"command\":\"host sh -c \\\"echo x > /boot/config/go\\\"\"}}" | claude-guard | jq -e ".hookSpecificOutput.permissionDecision == \"ask\""'
           docker run --rm claude-unraid-manager:smoke bash -n /usr/local/bin/host
-          docker run --rm claude-unraid-manager:smoke claude-settings-merge /usr/local/share/claude-unraid-manager/settings.json /usr/local/share/claude-unraid-manager/settings.json >/dev/null
+          docker run --rm claude-unraid-manager:smoke jq -e '.allowManagedPermissionRulesOnly == true' /etc/claude-code/managed-settings.json
           docker run --rm claude-unraid-manager:smoke bash -c 'grep -q "tmux attach" /etc/bash.bashrc && bash -n /etc/bash.bashrc'
           # The entrypoint's tmux calls, with the image's own tmux version.
           docker run --rm claude-unraid-manager:smoke bash -c 'tmux new-session -d -s main -c /workspace && tmux has-session -t "=main" && tmux send-keys -t "=main:" "true" C-m && tmux kill-server'
@@ -96,6 +96,11 @@ jobs:
       # host-readonly-setup prints it: the checks work, nothing else does.
       - name: Host checks over SSH
         run: bash tests/ssh-acceptance.sh claude-unraid-manager:smoke
+
+      # The real entrypoint: Claude as uid 99, policy files out of its reach,
+      # the Unraid API key only in the root-owned key file.
+      - name: Lockdown
+        run: bash tests/lockdown.sh claude-unraid-manager:smoke
 
       # Unraid runs on x86-64 only, so a single platform is built.
       - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
