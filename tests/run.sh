@@ -169,7 +169,7 @@ expect_contains "$TMP/CLAUDE.md" "Nearly full (95% or more used): disk1."
 expect_not_contains "$TMP/CLAUDE.md" "mdNumDisks"
 expect_contains "$TMP/CLAUDE.md" "- cache — \`/mnt/cache\`, btrfs, 2 devices, 1.9T, 11% used (1.7T free)"
 expect_contains "$TMP/CLAUDE.md" "- nvme — \`/mnt/nvme\`, zfs, 1.8T, 50% used (900G free)"
-expect_not_contains "$TMP/CLAUDE.md" '— mounted at `/mnt/<name>`'
+expect_not_contains "$TMP/CLAUDE.md" "— mounted at `/mnt/<name>`"
 expect_contains "$TMP/CLAUDE.md" "**Shares:** appdata, media"
 expect_contains "$TMP/CLAUDE.md" "- win11 (shut off)"
 expect_contains "$TMP/CLAUDE.md" "- Home Assistant (running)"
