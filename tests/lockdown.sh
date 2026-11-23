@@ -98,6 +98,21 @@ if printf '%s' "$mcp" | grep -q "$SECRET"; then fail "key in the managed MCP con
 if [ "$(owner /run/claude-unraid/.env)" = "root:users 640" ]; then pass "key file root:users 0640"; else fail "key file: $(owner /run/claude-unraid/.env)"; fi
 if as_claude 'echo x >> /run/claude-unraid/.env' 2>/dev/null; then fail "Claude's user can change the key file"; else pass "Claude's user cannot change the key file"; fi
 
+echo "lockdown: fix tools"
+if printf '%s' "$mcp" | jq -e '.mcpServers.fix.command == "/usr/local/share/claude-unraid-manager/watcher/node" and (.mcpServers.fix.args[0] | endswith("fix-mcp.mjs"))' >/dev/null; then pass "managed MCP config has the fix server"; else fail "fix server entry: $mcp"; fi
+if in_c 'jq -e ".permissions.allow | index(\"mcp__fix\")" /etc/claude-code/managed-settings.json' >/dev/null; then pass "fix tools allowed by the managed settings"; else fail "mcp__fix not allowed"; fi
+if [ "$(owner /workspace/.unraid-watch)" = "root:root 700" ]; then pass "watcher state root-only 0700"; else fail "watcher state: $(owner /workspace/.unraid-watch)"; fi
+if [ "$(owner /workspace/.unraid-watch/host-fix-key)" = "root:root 600" ]; then pass "host-fix key root-only 0600"; else fail "host-fix key: $(owner /workspace/.unraid-watch/host-fix-key)"; fi
+if as_claude 'cat /workspace/.unraid-watch/host-fix-key' >/dev/null 2>&1; then fail "Claude's user can read the host-fix key"; else pass "Claude's user cannot read the host-fix key"; fi
+if [ "$(owner /run/unraid-watch)" = "root:users 750" ]; then pass "fix socket directory root:users 0750"; else fail "fix socket directory: $(owner /run/unraid-watch)"; fi
+if in_c 'host-fix-setup --authorized-key' | grep -q '^restrict,command="/bin/bash /boot/config/claude-unraid/host-fix" ssh-ed25519 '; then pass "host-fix-setup prints the forced-command line"; else fail "host-fix-setup line"; fi
+if as_claude 'host-fix-setup' >/dev/null 2>&1; then fail "host-fix-setup works as Claude's user"; else pass "host-fix-setup refuses Claude's user"; fi
+# The fix server answers MCP and lists the tools; without a watcher socket (the
+# dummy token cannot log in) a call is refused, nothing is changed.
+mcp_out=$(as_claude 'printf "%s\n" "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\"}}" "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}" "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"container_restart\",\"arguments\":{\"name\":\"x\",\"reason\":\"test\"}}}" | timeout 20 /usr/local/share/claude-unraid-manager/watcher/node /usr/local/share/claude-unraid-manager/watcher/src/fix-mcp.mjs' 2>&1)
+if printf '%s\n' "$mcp_out" | jq -se '.[1].result.tools | map(.name) | index("container_update") and index("appdata_chown")' >/dev/null 2>&1; then pass "fix server lists the tools"; else fail "fix server tools/list: $(printf '%s' "$mcp_out" | head -c 400)"; fi
+if printf '%s\n' "$mcp_out" | jq -se '.[2].result.isError == true' >/dev/null 2>&1; then pass "fix call without the watcher is refused"; else fail "fix call: $(printf '%s' "$mcp_out" | tail -c 400)"; fi
+
 echo "lockdown: ownership"
 for p in /home/claude /workspace /workspace/CLAUDE.md /home/claude/.ssh/claude-host-readonly; do
   o=$(in_c "stat -c %U $p" 2>/dev/null)

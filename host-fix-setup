@@ -1,0 +1,65 @@
+#!/bin/bash
+# host-fix-setup — the steps to allow the host fixes (update a container,
+# fix appdata ownership), each approved by the owner in Discord.
+#
+#   host-fix-setup                    print the steps
+#   host-fix-setup --authorized-key   print only the authorized_keys line
+#
+# Run as root (docker exec -it claude-unraid-manager host-fix-setup): the key
+# belongs to the Discord watcher, which runs as root, not to Claude's user.
+# The container never writes to the host itself: you run the printed commands
+# in the Unraid terminal, after reading the script they install.
+set -euo pipefail
+
+key=${WATCH_STATE_DIR:-/workspace/.unraid-watch}/host-fix-key
+dispatcher=/boot/config/claude-unraid/host-fix
+container=$(hostname)
+
+if [ "$(id -u)" != 0 ]; then
+  echo "host-fix-setup: run it as root: docker exec -it $container host-fix-setup" >&2
+  exit 77
+fi
+if [ ! -f "$key.pub" ]; then
+  echo "host-fix-setup: no key yet. It is created when the Discord watcher is set up" >&2
+  echo "host-fix-setup: (Discord bot token and user ID in the template), then restart the container." >&2
+  exit 69
+fi
+line="restrict,command=\"/bin/bash $dispatcher\" $(cat "$key.pub")"
+
+if [ "${1:-}" = --authorized-key ]; then
+  printf '%s\n' "$line"
+  exit 0
+fi
+
+cat <<EOF
+Host fixes: setup
+
+With this, Claude can ask (and only after you tap Allow in Discord, every
+time) to:
+  - update a container the way the Docker tab does (pull, re-create)
+  - fix the owner of a folder below a container's appdata folder
+Nothing else: no array, disks, parity, shares or flash drive, and never this
+tool's own containers or data.
+
+Run these in the Unraid terminal as root (Unraid web UI, top right, terminal
+icon). The container does not do this for you.
+
+1. Copy the script to the flash drive and read it:
+
+   mkdir -p /boot/config/claude-unraid
+   docker cp $container:/usr/local/share/claude-unraid-manager/host-fix $dispatcher
+   less $dispatcher
+
+2. Allow the watcher's key to run that script and nothing else:
+
+   echo '$line' >> /root/.ssh/authorized_keys
+
+3. SSH must be on (Settings → Management Access → Use SSH: Yes), and
+   "Unraid SSH host" must be set in this container's template (the same as
+   for the read-only checks).
+
+4. Restart this container. The log then says:
+   unraid-watch: host fixes over SSH to <ip> (host-fix 1)
+
+To undo: delete that line from /root/.ssh/authorized_keys.
+EOF

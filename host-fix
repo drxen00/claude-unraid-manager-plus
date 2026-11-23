@@ -1,0 +1,147 @@
+#!/bin/bash
+# host-fix — the few changes the claude-unraid-manager Discord watcher may
+# make on the Unraid host. Each one runs only after the owner tapped Allow in
+# Discord for that exact change.
+#
+# You install it on the flash drive yourself and bind it to one SSH key in
+# /root/.ssh/authorized_keys (host-fix-setup prints the steps):
+#
+#   restrict,command="/bin/bash /boot/config/claude-unraid/host-fix" ssh-ed25519 AAAA… claude-unraid-manager-host-fix
+#
+# That key is held by the watcher (root inside the container), not by Claude's
+# user: Claude can ask for a fix, it cannot connect here. For every connection
+# with the key sshd runs this script, whatever the client asked for; the
+# request only arrives as text in SSH_ORIGINAL_COMMAND. It is checked against
+# the commands below and run as a fixed argument list: nothing is handed to a
+# shell, globbing is off, and only the characters [A-Za-z0-9 _./:=,@+-] are
+# accepted at all.
+#
+# What it can do:
+#   update <container>          Unraid's own "Update": pull the image and
+#                               re-create the container from its template
+#   chown <uid>:<gid> <path>    give a folder below appdata/<app> to a user
+# It never touches the array, disks, parity, shares or the flash drive, and
+# never this tool's own containers or data.
+#
+#   host-fix <command …>            run locally (as root), same rules
+#   host-fix --print <command …>    print what would run, run nothing
+#   host-fix help                   list the commands
+set -u -f
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export LC_ALL=C
+VERSION=1
+
+UPDATE=/usr/local/emhttp/plugins/dynamix.docker.manager/scripts/update_container
+TEMPLATES=/boot/config/plugins/dockerMan/templates-user
+DOCKER_CFG=/boot/config/docker.cfg
+# Marker the container puts into the watcher's own data folder.
+MARKER=.claude-unraid-watch
+
+print=false
+if [ "${1:-}" = --print ]; then print=true; shift; fi
+# ROOT: a fixture tree for the tests. Only for a local run; never under sshd.
+ROOT=""
+if [ -n "${SSH_ORIGINAL_COMMAND+x}" ]; then
+  request=$SSH_ORIGINAL_COMMAND
+else
+  request="$*"
+  ROOT=${HOST_FIX_TEST_ROOT:-}
+fi
+
+refuse() {
+  echo "host-fix: refused: $1" >&2
+  exit 65
+}
+
+usage() {
+  cat <<'USAGE'
+host-fix: changes on the Unraid host, each approved by the owner in Discord
+  help | version
+  update <container>          pull the image and re-create the container from
+                              its Unraid template (the Docker tab's Update)
+  chown <uid>:<gid> <path>    change the owner of /mnt/<pool>/<appdata>/<app>[/…]
+                              and everything in it (symlinks are not followed)
+USAGE
+  exit 0
+}
+
+is_container() { [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$ ]]; }
+is_own()       { [[ $1 == claude-unraid-manager* || $1 == claude-docker-proxy* ]]; }
+
+[ ${#request} -le 512 ] || refuse "request too long"
+if [[ $request =~ [^A-Za-z0-9\ _./:=,@+-] ]]; then
+  refuse "characters outside [A-Za-z0-9 _./:=,@+-]"
+fi
+read -r -a w <<< "$request"
+[ ${#w[@]} -le 4 ] || refuse "too many arguments"
+[ ${#w[@]} -ge 1 ] || usage
+n=${#w[@]}
+a1=${w[1]:-}
+
+case "${w[0]}" in
+  help) usage ;;
+  version)
+    if $print; then echo version; exit 0; fi
+    echo "$VERSION"; exit 0 ;;
+
+  update)
+    [ "$n" -eq 2 ] || refuse "update <container>"
+    is_container "$a1" || refuse "'$a1' is not a container name"
+    is_own "$a1" && refuse "this tool's own containers are updated by the owner, on the Docker tab"
+    # Only containers installed through Unraid's Docker tab have a template.
+    # The glob is a fixed path; the name is matched as fixed text.
+    set +f
+    grep -qsF "<Name>$a1</Name>" "$ROOT$TEMPLATES"/*.xml \
+      || refuse "no Unraid template names a container '$a1'; only containers from the Docker tab can be updated here"
+    set -f
+    if [ -x "$ROOT$UPDATE" ]; then cmd=("$ROOT$UPDATE" "$a1")
+    elif [ -f "$ROOT$UPDATE" ]; then cmd=(php -q "$ROOT$UPDATE" "$a1")
+    else
+      echo "host-fix: Unraid's update script is not at $UPDATE on this Unraid version" >&2
+      exit 69
+    fi
+    if $print; then echo "update_container $a1"; exit 0; fi
+    before=$(docker inspect --format '{{.Image}}' "$a1" 2>/dev/null)
+    # The script reports progress to the web UI, not to stdout.
+    timeout 900 "${cmd[@]}" >/dev/null 2>&1
+    rc=$?
+    after=$(docker inspect --format '{{.Image}}' "$a1" 2>/dev/null)
+    echo "update_container finished with exit code $rc"
+    if [ -z "$after" ]; then echo "image: the container does not exist now"
+    elif [ "$before" = "$after" ]; then echo "image: unchanged (${after:7:12})"
+    else echo "image: changed from ${before:7:12} to ${after:7:12}"; fi
+    docker ps -a --filter "name=^/${a1}\$" --format 'now: {{.Names}} is {{.Status}} (image {{.Image}})'
+    exit "$rc" ;;
+
+  chown)
+    [ "$n" -eq 3 ] || refuse "chown <uid>:<gid> <path below appdata>"
+    [[ $a1 =~ ^[0-9]{1,5}:[0-9]{1,5}$ ]] || refuse "owner must be numeric <uid>:<gid>"
+    p=${w[2]}
+    # The appdata share's name, from Settings → Docker ("appdata" by default).
+    appdata=$(sed -n 's/^DOCKER_APP_CONFIG_PATH="\(.*\)"$/\1/p' "$ROOT$DOCKER_CFG" 2>/dev/null)
+    share=$(basename "${appdata:-/mnt/user/appdata}")
+    [[ $share =~ ^[A-Za-z0-9_-]+$ ]] || share=appdata
+    # /mnt/<user|pool|diskN>/<share>/<app>[/…]; captures the share path and <app>.
+    re="^(/mnt/[A-Za-z0-9_.-]+/$share)/([A-Za-z0-9_.@+=,:-]+)(/.*)?\$"
+    [[ $p != *..* && $p != *//* ]] || refuse "path must not contain .. or //"
+    [[ $p =~ $re ]] || refuse "only folders below /mnt/<pool>/$share/<app> can be changed"
+    real=$(realpath -e -- "$ROOT$p" 2>/dev/null) || refuse "'$p' does not exist"
+    real=${real#"$ROOT"}
+    # Checked again after resolving symlinks, so a link cannot lead elsewhere.
+    [[ $real =~ $re ]] || refuse "'$p' resolves to '$real', outside appdata"
+    app=${BASH_REMATCH[2]}
+    appdir=${BASH_REMATCH[1]}/$app
+    is_own "$app" && refuse "this tool's own data is not changed from here"
+    if [ -n "$(find "$ROOT$appdir" -maxdepth 3 -name "$MARKER" -print -quit 2>/dev/null)" ]; then
+      refuse "this tool's own data is not changed from here"
+    fi
+    if $print; then echo "chown -R -h $a1 $real"; exit 0; fi
+    # -h: change a symlink itself, never what it points to.
+    chown -R -h -- "$a1" "$real"
+    rc=$?
+    echo "chown finished with exit code $rc"
+    ls -ldn -- "$real"
+    exit "$rc" ;;
+
+  *) refuse "unknown command '${w[0]}'" ;;
+esac

@@ -6,13 +6,15 @@
 // the watcher validates and checks it (rules.mjs). Started by the
 // container's entrypoint as root, so Claude's user cannot read its Discord
 // token or its state; Claude itself runs as that user.
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { randomBytes } from 'node:crypto';
+import { access, chmod, lstat, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 import { ActionBook, CATALOG, describeOffer, validateSuggestions } from './actions.mjs';
-import { askClaude, chatPrompt, incidentPrompt, morningPrompt } from './claude.mjs';
+import { askClaude, chatPrompt, fixPrompt, incidentPrompt, morningPrompt } from './claude.mjs';
 import { collect } from './checks.mjs';
 import { loadConfig } from './config.mjs';
-import { startDiscord } from './discord.mjs';
+import { approvalRow, startDiscord } from './discord.mjs';
+import { APPROVAL_MS, FixBroker, serveFixSocket } from './fix.mjs';
 import { diff, emptyState, failureFindings, openIncidents } from './incidents.mjs';
 import {
   addAlert, addMute, addNote, describeCondition, describeRule, emptyPrefs, listRules, matches,
@@ -32,7 +34,7 @@ const HELP = [
   '• `remove <id>` (e.g. `remove m1`) or `remove all`',
   '• `mute <word> [7d|12h|forever]`, `snooze <word> [days]`, `note <text>`: quick versions without Claude',
   '• `help`: this list',
-  'Claude can only look; container fixes come as buttons you tap.',
+  'To fix something, tap 🛠️ Fix it on an alert or just ask ("sonarr says permission denied, fix it"). Claude asks you with Allow / Deny before every single change.',
 ].join('\n');
 
 const ICON = { critical: '🔴', warning: '⚠️' };
@@ -46,6 +48,25 @@ async function readJson(path, fallback) {
   } catch {
     return fallback;
   }
+}
+
+// The state directory holds the owner's rules and the host-fix key. It sits
+// on the workspace mount, which Claude's user owns: a directory there that is
+// not root's and private could have been planted, so it is moved aside.
+async function secureDir(dir) {
+  const root = process.getuid?.() === 0;
+  try {
+    const st = await lstat(dir);
+    if (root && (!st.isDirectory() || st.uid !== 0 || (st.mode & 0o077) !== 0)) {
+      const aside = `${dir}.untrusted-${Date.now()}`;
+      await rename(dir, aside);
+      console.error(`unraid-watch: ${dir} was not root-only; moved it to ${aside} and started clean`);
+    }
+  } catch {
+    // Not there yet.
+  }
+  await mkdir(dir, { recursive: true, mode: 0o700 });
+  await chmod(dir, 0o700);
 }
 
 async function writeJson(path, value) {
@@ -62,7 +83,7 @@ async function main() {
     process.exit(2);
   }
 
-  await mkdir(cfg.stateDir, { recursive: true, mode: 0o700 });
+  await secureDir(cfg.stateDir);
   const statePath = join(cfg.stateDir, 'state.json');
   const prefsPath = join(cfg.stateDir, 'prefs.json');
   // First start or unreadable: start clean (open problems are re-reported).
@@ -123,9 +144,18 @@ async function main() {
   const book = new ActionBook({
     run,
     auditPath: join(cfg.stateDir, 'audit.jsonl'),
-    local: Object.fromEntries(
-      ['watch.mute', 'watch.alert', 'watch.note', 'watch.remove', 'watch.undo'].map((a) => [a, async (o) => (await applyRule(o)).message]),
-    ),
+    local: {
+      ...Object.fromEntries(
+        ['watch.mute', 'watch.alert', 'watch.note', 'watch.remove', 'watch.undo'].map((a) => [a, async (o) => (await applyRule(o)).message]),
+      ),
+      'watch.fix': async (o) => {
+        const busy = activeMode !== null;
+        startFix(o.spec.problems);
+        return busy
+          ? '🛠️ Queued: Claude starts on it as soon as the current task is done, and asks you before every change.'
+          : '🛠️ On it. Claude looks into it now and asks you before every change.';
+      },
+    },
   });
 
   // One Claude run at a time; later requests wait their turn.
@@ -155,7 +185,7 @@ async function main() {
   // Send Claude's reply. apply: rule changes were asked for in the owner's
   // own chat message, so they take effect now, with an Undo button; in
   // reports and alerts they are only offered as buttons.
-  async function respond(text, suggestions, { apply = false } = {}) {
+  async function respond(text, suggestions, { apply = false, fixFor = [] } = {}) {
     const valid = validateSuggestions(suggestions, containers);
     const done = [];
     const offers = [];
@@ -179,19 +209,35 @@ async function main() {
       const u = { action: 'watch.undo', target: 'undo', spec: undo };
       offers.push({ ...u, id: book.offer(u) });
     }
+    if (fixFor.length) {
+      const f = { action: 'watch.fix', target: 'fix', spec: { problems: fixFor.map((i) => ({ id: i.key, problem: i.title, detail: i.detail })) } };
+      offers.push({ ...f, id: book.offer(f) });
+    }
     const exact = offers.map(describeOffer).filter(Boolean).map((d) => `Tap to: ${d}`);
     const tail = [...done, ...exact];
     await say(tail.length ? `${text}\n\n${tail.join('\n')}` : text, offers);
   }
 
-  async function ask(prompt) {
+  // Which kind of Claude run is going on: fix requests during a report or an
+  // alert are refused, and the owner sees where a request comes from.
+  let activeMode = null;
+  async function ask(prompt, mode = 'report') {
     const stop = setInterval(() => bot.typing(), 8000);
     bot.typing();
+    activeMode = mode;
     try {
-      return await askClaude(cfg, prompt, { asClaude });
+      return await askClaude(cfg, prompt, { asClaude, mode });
     } finally {
+      activeMode = null;
       clearInterval(stop);
     }
+  }
+
+  function startFix(problems) {
+    withClaude(async () => {
+      const r = await ask(fixPrompt(problems, ctx()), 'fix');
+      await say(r.ok ? `🛠️ **Fix report**\n${r.text}` : `🛠️ Claude could not finish: ${r.error}`);
+    }).catch((err) => console.error(`unraid-watch: fix run failed: ${err.stack ?? err}`));
   }
 
   const shownIncidents = () => partition(prefs, openIncidents(state)).shown;
@@ -253,7 +299,7 @@ async function main() {
             const r = await ask(incidentPrompt(raised, shownIncidents(), ctx()));
             if (r.ok) {
               const head = raised.some((i) => i.severity === 'critical') ? '🔴 **New problem**' : '⚠️ **New problem**';
-              await respond(`${head}\n${r.text}`, r.actions);
+              await respond(`${head}\n${r.text}`, r.actions, { fixFor: raised });
             } else {
               await say(`${plainList(raised)}\n\n_(Claude could not look into this: ${r.error})_`);
             }
@@ -322,14 +368,73 @@ async function main() {
     if (reply === '') return;
     if (reply !== null) return say(reply);
     return withClaude(async () => {
-      const r = await ask(chatPrompt(text, shownIncidents(), ctx()));
+      const r = await ask(chatPrompt(text, shownIncidents(), ctx()), 'chat');
       if (r.ok) await respond(r.text, r.actions, { apply: true });
       else await say(`Claude could not answer: ${r.error}`);
     });
   }
 
+  // One Allow/Deny question per change Claude asks for (fix.mjs).
+  const approvals = new Map();
+  async function askOwner({ what, reason, source }) {
+    const id = randomBytes(9).toString('base64url');
+    const from = source ? ` (${source})` : '';
+    const text = `🛠️ **Claude wants to ${what}**${from}${reason ? `\nWhy: ${reason}` : ''}\n_Nothing happens unless you tap Allow (within 15 minutes)._`;
+    remember('bot', text);
+    const msg = await bot.send(text, [], { rows: [approvalRow(id)] });
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        approvals.delete(id);
+        msg?.edit({ components: [] }).catch(() => {});
+        say('⌛ No answer in 15 minutes, so that change was not made.').catch(() => {});
+        resolve('timeout');
+      }, APPROVAL_MS);
+      approvals.set(id, { resolve, timer });
+    });
+  }
+  function onApproval(id, allow) {
+    const a = approvals.get(id);
+    if (!a) return 'That request is no longer waiting. Nothing was changed.';
+    approvals.delete(id);
+    clearTimeout(a.timer);
+    a.resolve(allow ? 'allow' : 'deny');
+    remember('owner', allow ? '(tapped Allow)' : '(tapped Deny)');
+    return allow ? '👍 Allowed. Working on it…' : '👎 Denied. Nothing was changed.';
+  }
+
+  // host-fix on the Unraid host, with the watcher's own key (entrypoint).
+  const hostFixKey = join(cfg.stateDir, 'host-fix-key');
+  const hostFixReady = Boolean(cfg.sshHost) && (await access(hostFixKey).then(() => true, () => false));
+  const hostFix = hostFixReady
+    ? (args, timeoutMs) => run('ssh', [
+      '-T', '-i', hostFixKey, '-p', String(cfg.sshPort),
+      '-o', 'BatchMode=yes', '-o', 'IdentitiesOnly=yes', '-o', 'ConnectTimeout=5', '-o', 'LogLevel=ERROR',
+      '-o', 'StrictHostKeyChecking=accept-new', '-o', `UserKnownHostsFile=${join(cfg.stateDir, 'known_hosts')}`,
+      `root@${cfg.sshHost}`, '--', args.join(' '),
+    ], { timeoutMs })
+    : null;
+  if (hostFix) {
+    const v = await hostFix(['version'], 15_000);
+    if (v.code === 0) console.log(`unraid-watch: host fixes over SSH to ${cfg.sshHost} (host-fix ${v.stdout.trim()})`);
+    else console.log(`unraid-watch: host fixes not working yet (${(v.stderr || v.stdout).trim().slice(0, 200) || `exit ${v.code}`}); updates and permission fixes need host-fix-setup`);
+  }
+
+  const broker = new FixBroker({
+    askOwner,
+    run,
+    hostFix,
+    audit: (e) => book.audit(e),
+    containers: () => containers,
+    notify: (text) => say(text),
+    policy: () => {
+      if (activeMode === 'report') return { refuse: 'Fix tools are not used during reports and alerts. Say what you would change; the owner can tap Fix it.' };
+      return { source: activeMode === 'chat' ? 'you asked in this chat' : activeMode === 'fix' ? 'Fix it' : 'from your Claude app session' };
+    },
+  });
+
   bot = await startDiscord(cfg, {
     onText,
+    onApproval,
     onFix: async (id, who) => {
       const r = await book.approve(id, who);
       remember('bot', r.message);
@@ -337,6 +442,14 @@ async function main() {
     },
     onSkip: (ids) => book.withdraw(ids),
   });
+
+  try {
+    await mkdir(dirname(cfg.fixSocket), { recursive: true, mode: 0o750 });
+    await serveFixSocket(cfg.fixSocket, broker, { gid: cfg.claudeGid });
+    console.log(`unraid-watch: fix requests on ${cfg.fixSocket}`);
+  } catch (err) {
+    console.error(`unraid-watch: cannot listen for fix requests on ${cfg.fixSocket}: ${err.message}; Claude cannot change anything`);
+  }
 
   const when = cfg.reportTime === 'off' ? 'no morning report' : `the morning report at ${cfg.reportTime}`;
   await say(`👋 Unraid watcher started. I check the server every ${cfg.intervalMinutes} minutes and send ${when}. Type \`help\` for commands.`);

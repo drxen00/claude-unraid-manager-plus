@@ -1,0 +1,94 @@
+// fix-mcp: a tiny MCP server (stdio, JSON-RPC, one message per line) that
+// offers the fix tools to Claude. It runs as Claude's user, holds no secrets
+// and changes nothing itself: each call is forwarded to the watcher's socket,
+// where the owner allows or denies it in Discord. Listed in the root-owned
+// managed MCP config by the entrypoint when the Discord watcher is set up.
+import { createConnection } from 'node:net';
+import { createInterface } from 'node:readline';
+import { pathToFileURL } from 'node:url';
+import { APPROVAL_MS, FIX_HELP, FIX_TOOLS } from './fix.mjs';
+
+const SOCKET = process.env.UNRAID_FIX_SOCKET || '/run/unraid-watch/fix.sock';
+// Waiting for the owner plus the slowest fix (an image pull).
+const CALL_TIMEOUT_MS = APPROVAL_MS + 20 * 60_000;
+
+export function callWatcher(req, { socket = SOCKET, timeoutMs = CALL_TIMEOUT_MS } = {}) {
+  return new Promise((resolve) => {
+    let buf = '';
+    let settled = false;
+    const finish = (r) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      conn.destroy();
+      resolve(r);
+    };
+    const conn = createConnection(socket);
+    const timer = setTimeout(() => finish({ ok: false, text: 'No answer from the watcher in time. Nothing was changed.' }), timeoutMs);
+    conn.setEncoding('utf8');
+    conn.on('connect', () => conn.write(JSON.stringify(req) + '\n'));
+    conn.on('data', (d) => {
+      buf += d;
+      const nl = buf.indexOf('\n');
+      if (nl < 0) return;
+      try {
+        const r = JSON.parse(buf.slice(0, nl));
+        finish({ ok: Boolean(r.ok), text: String(r.text ?? '') });
+      } catch {
+        finish({ ok: false, text: 'The watcher sent an unreadable answer. Nothing was changed.' });
+      }
+    });
+    conn.on('error', (err) => finish({ ok: false, text: `The Discord watcher is not reachable (${err.code ?? err.message}), so nothing can be changed right now.` }));
+    conn.on('close', () => finish({ ok: false, text: 'The watcher closed the connection without an answer. Nothing was changed.' }));
+  });
+}
+
+export async function handleMessage(msg, { call = callWatcher } = {}) {
+  if (!msg || typeof msg !== 'object' || msg.jsonrpc !== '2.0') return null;
+  const { id, method, params } = msg;
+  if (id === undefined || id === null) return null; // a notification: nothing to answer
+  const ok = (result) => ({ jsonrpc: '2.0', id, result });
+  switch (method) {
+    case 'initialize':
+      return ok({
+        protocolVersion: typeof params?.protocolVersion === 'string' ? params.protocolVersion : '2025-06-18',
+        capabilities: { tools: {} },
+        serverInfo: { name: 'unraid-fix', version: '1' },
+        instructions: FIX_HELP,
+      });
+    case 'ping':
+      return ok({});
+    case 'tools/list':
+      return ok({
+        tools: Object.entries(FIX_TOOLS).map(([name, t]) => ({ name, description: `${t.description} ${FIX_HELP}`, inputSchema: t.inputSchema })),
+      });
+    case 'tools/call': {
+      const name = String(params?.name ?? '');
+      if (!Object.hasOwn(FIX_TOOLS, name)) return { jsonrpc: '2.0', id, error: { code: -32602, message: `Unknown tool: ${name}` } };
+      const args = params?.arguments && typeof params.arguments === 'object' ? params.arguments : {};
+      const r = await call({ tool: name, args });
+      return ok({ content: [{ type: 'text', text: r.text || (r.ok ? 'Done.' : 'Failed.') }], isError: !r.ok });
+    }
+    default:
+      return { jsonrpc: '2.0', id, error: { code: -32601, message: `Method not found: ${method}` } };
+  }
+}
+
+function serve() {
+  const rl = createInterface({ input: process.stdin });
+  rl.on('line', async (line) => {
+    if (!line.trim()) return;
+    let msg;
+    try {
+      msg = JSON.parse(line);
+    } catch {
+      process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error' } }) + '\n');
+      return;
+    }
+    const res = await handleMessage(msg);
+    if (res) process.stdout.write(JSON.stringify(res) + '\n');
+  });
+  rl.on('close', () => process.exit(0));
+}
+
+if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) serve();

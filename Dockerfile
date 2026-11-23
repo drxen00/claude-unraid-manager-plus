@@ -19,7 +19,7 @@ WORKDIR /watcher
 COPY watcher/package.json watcher/package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 COPY watcher/src ./src
-RUN node --check src/main.mjs && cp /usr/local/bin/node /watcher/node
+RUN node --check src/main.mjs && node --check src/fix-mcp.mjs && cp /usr/local/bin/node /watcher/node
 
 # ── runtime ──────────────────────────────────────────────────────────────────
 # Claude Code runs natively. Node.js is only shipped for the watcher, outside
@@ -75,10 +75,12 @@ COPY unraid-mcp-tools      /usr/local/share/claude-unraid-manager/unraid-mcp-too
 # Installed on the host by the user (host-readonly-setup prints the steps);
 # also run through the privileged helper for the scan when the raw socket is mounted.
 COPY host-readonly         /usr/local/share/claude-unraid-manager/host-readonly
-COPY entrypoint.sh generate-claude-md.sh host boot-mode docker-mode logs claude-guard claude-session unraid-mcp-config host-readonly-setup /usr/local/bin/
+# The host fixes, installed the same way (host-fix-setup prints the steps).
+COPY host-fix              /usr/local/share/claude-unraid-manager/host-fix
+COPY entrypoint.sh generate-claude-md.sh host boot-mode docker-mode logs claude-guard claude-session unraid-mcp-config host-readonly-setup host-fix-setup /usr/local/bin/
 RUN chmod 0755 /usr/local/bin/entrypoint.sh /usr/local/bin/generate-claude-md.sh \
              /usr/local/bin/host /usr/local/bin/boot-mode /usr/local/bin/docker-mode /usr/local/bin/logs /usr/local/bin/claude-guard \
-             /usr/local/bin/claude-session /usr/local/bin/unraid-mcp-config /usr/local/bin/host-readonly-setup
+             /usr/local/bin/claude-session /usr/local/bin/unraid-mcp-config /usr/local/bin/host-readonly-setup /usr/local/bin/host-fix-setup
 
 # IS_SANDBOX is deliberately not set: it only serves to allow
 # --dangerously-skip-permissions as root, which this image does not support.

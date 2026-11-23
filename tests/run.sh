@@ -736,6 +736,79 @@ refused_hr "$(printf 'uptime\nid')"
 refused_hr "$(printf 'uptime\tid')"
 refused_hr "uptime $(head -c 600 /dev/zero | tr '\0' a)"
 
+echo "host-fix"
+# A fixture host: Unraid's update script, one user template, docker.cfg, appdata.
+HF="$TMP/hf"
+mkdir -p "$HF/usr/local/emhttp/plugins/dynamix.docker.manager/scripts" "$HF/boot/config/plugins/dockerMan/templates-user" \
+  "$HF/mnt/user/appdata/sonarr/config" "$HF/mnt/cache/appdata/radarr" "$HF/mnt/user/appdata/claude-unraid-manager/workspace" \
+  "$HF/mnt/user/appdata/renamed-tool/workspace/.unraid-watch" "$HF/mnt/user/media/x" "$HF/etc"
+printf '#!/bin/sh\nexit 0\n' > "$HF/usr/local/emhttp/plugins/dynamix.docker.manager/scripts/update_container"
+chmod +x "$HF/usr/local/emhttp/plugins/dynamix.docker.manager/scripts/update_container"
+printf '<?xml version="1.0"?>\n<Container>\n  <Name>sonarr</Name>\n</Container>\n' > "$HF/boot/config/plugins/dockerMan/templates-user/my-sonarr.xml"
+printf 'DOCKER_APP_CONFIG_PATH="/mnt/user/appdata/"\n' > "$HF/boot/config/docker.cfg"
+: > "$HF/mnt/user/appdata/renamed-tool/workspace/.unraid-watch/.claude-unraid-watch"
+ln -s "$HF/etc" "$HF/mnt/user/appdata/evil"
+ln -s "$HF/etc" "$HF/mnt/user/appdata/sonarr/escape"
+hf() { env -u SSH_ORIGINAL_COMMAND HOST_FIX_TEST_ROOT="$HF" bash "$ROOT/host-fix" --print "$@"; }
+expect_hf() {
+  local want=$1 out
+  shift
+  out=$(hf "$@" 2>&1)
+  if [ "$out" = "$want" ]; then pass "host-fix: $*"; else fail "host-fix: $* -> '$out' (want '$want')"; fi
+}
+expect_hf 'update_container sonarr' update sonarr
+expect_hf 'chown -R -h 99:100 /mnt/user/appdata/sonarr' chown 99:100 /mnt/user/appdata/sonarr
+expect_hf 'chown -R -h 1000:1000 /mnt/user/appdata/sonarr/config' chown 1000:1000 /mnt/user/appdata/sonarr/config/
+expect_hf 'chown -R -h 99:100 /mnt/cache/appdata/radarr' chown 99:100 /mnt/cache/appdata/radarr
+expect_hf version version
+refused_hf() {
+  local out st
+  set +e
+  out=$(env -u SSH_ORIGINAL_COMMAND HOST_FIX_TEST_ROOT="$HF" bash "$ROOT/host-fix" --print "$@" 2>&1)
+  st=$?
+  set -e
+  if [ "$st" -eq 65 ]; then pass "host-fix refused: $*"; else fail "host-fix not refused ($st): $* -> $out"; fi
+}
+refused_hf update plex
+refused_hf update claude-unraid-manager
+refused_hf update claude-docker-proxy
+refused_hf update 'sonarr;id'
+refused_hf update
+refused_hf update sonarr radarr
+refused_hf chown 99:100 /mnt/user/appdata
+refused_hf chown 99:100 /mnt/user/media/x
+refused_hf chown root:root /mnt/user/appdata/sonarr
+refused_hf chown 99:100 /mnt/user/appdata/../../etc
+refused_hf chown 99:100 /mnt/user/appdata/evil
+refused_hf chown 99:100 /mnt/user/appdata/sonarr/escape
+refused_hf chown 99:100 /mnt/user/appdata/claude-unraid-manager
+refused_hf chown 99:100 /mnt/user/appdata/renamed-tool
+refused_hf chown 99:100 /mnt/user/appdata/ghost
+refused_hf chown 99:100 /boot
+refused_hf chown 99:100 /mnt/disk1
+refused_hf rm -rf /
+refused_hf mdcmd stop
+refused_hf sh -c id
+# Under sshd the request comes from SSH_ORIGINAL_COMMAND and the test root is
+# ignored: this runner has no Unraid templates, so the update is refused.
+set +e
+out=$(SSH_ORIGINAL_COMMAND='update sonarr' HOST_FIX_TEST_ROOT="$HF" bash "$ROOT/host-fix" --print 2>&1)
+st=$?
+set -e
+if [ "$st" -eq 65 ] && printf '%s' "$out" | grep -q 'no Unraid template'; then pass "host-fix: test root ignored under ssh"; else fail "host-fix under ssh ($st): $out"; fi
+out=$(SSH_ORIGINAL_COMMAND='version' bash "$ROOT/host-fix" rm -rf /)
+if [ "$out" = 1 ]; then pass "host-fix: arguments ignored under ssh"; else fail "host-fix arguments under ssh: '$out'"; fi
+# A real chown in the fixture (as this user, to its own uid): it changes the
+# folder and does not follow the link inside it.
+me="$(id -u):$(id -g)"
+before=$(stat -c %u:%g "$HF/etc")
+if env -u SSH_ORIGINAL_COMMAND HOST_FIX_TEST_ROOT="$HF" bash "$ROOT/host-fix" chown "$me" /mnt/user/appdata/sonarr >/dev/null 2>&1; then
+  pass "host-fix: chown runs"
+else
+  fail "host-fix: chown failed"
+fi
+if [ "$(stat -c %u:%g "$HF/etc")" = "$before" ]; then pass "host-fix: chown does not follow links"; else fail "host-fix: link target changed"; fi
+
 echo "unraid-mcp-config"
 mc() { env -u UNRAID_API_URL -u UNRAID_API_KEY UNRAID_MCP_TOOLS_FILE="$ROOT/unraid-mcp-tools" UNRAID_MCP_HOME="$TMP/mcphome" UNRAID_MCP_GROUP="$(id -g)" "$@" bash "$ROOT/unraid-mcp-config" "$TMP/mcp.json"; }
 rm -rf "$TMP/mcp.json" "$TMP/mcphome"

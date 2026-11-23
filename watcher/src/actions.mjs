@@ -19,8 +19,10 @@ export const CATALOG = {
   'watch.alert': { local: true },
   'watch.note': { local: true },
   'watch.remove': { local: true },
-  // Only ever created by the watcher (the Undo button), never accepted from Claude.
+  // Only ever created by the watcher (the Undo and Fix it buttons), never
+  // accepted from Claude.
   'watch.undo': { local: true, internal: true },
+  'watch.fix': { local: true, internal: true },
 };
 
 export function buttonLabel(o) {
@@ -30,6 +32,7 @@ export function buttonLabel(o) {
     case 'watch.note': return '📝 Remember this note';
     case 'watch.remove': return `🗑️ Remove ${o.target}`.slice(0, 80);
     case 'watch.undo': return '↩️ Undo';
+    case 'watch.fix': return '🛠️ Fix it';
     default: return `${CATALOG[o.action].label} ${o.target}`.slice(0, 80);
   }
 }
@@ -38,6 +41,7 @@ export function buttonLabel(o) {
 // under the message, so the owner sees it before tapping.
 export function describeOffer(o) {
   if (o.action === 'watch.remove') return `🗑️ **Remove** rule${o.spec.ids.length === 1 ? '' : 's'} ${o.spec.ids.map((i) => `\`${i}\``).join(', ')}`;
+  if (o.action === 'watch.fix') return '🛠️ **Fix it**: Claude works on it and asks you before every change.';
   if (o.action === 'watch.undo' || !o.action.startsWith('watch.')) return '';
   return describeRule(o.spec);
 }

@@ -41,6 +41,14 @@ export function buttonRows(offers) {
   return [row];
 }
 
+// Allow / Deny for one change Claude asks to make (fix.mjs).
+export function approvalRow(id) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`ok:${id}`).setLabel('Allow').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId(`no:${id}`).setLabel('Deny').setStyle(ButtonStyle.Danger),
+  );
+}
+
 // The buttons left after a click: the clicked one goes; "Not now" clears the
 // row; a row with no fix buttons left is dropped with its "Not now".
 export function remainingRows(rows, clickedId) {
@@ -72,13 +80,16 @@ export async function startDiscord(cfg, handlers) {
     return dm;
   }
 
-  async function send(text, offers = []) {
+  // Returns the last message sent, so its buttons can be removed later.
+  async function send(text, offers = [], { rows = [] } = {}) {
     const channel = await ownerDm();
     const parts = chunk(text || '(empty)');
+    let msg;
     for (let i = 0; i < parts.length; i++) {
       const last = i === parts.length - 1;
-      await channel.send({ content: parts[i], components: last ? buttonRows(offers) : [], allowedMentions: { parse: [] } });
+      msg = await channel.send({ content: parts[i], components: last ? [...buttonRows(offers), ...rows] : [], allowedMentions: { parse: [] } });
     }
+    return msg;
   }
 
   async function typing() {
@@ -118,6 +129,8 @@ export async function startDiscord(cfg, handlers) {
       } else if (kind === 'skip') {
         handlers.onSkip(payload.split('.'));
         await interaction.followUp({ content: 'OK, leaving it. Nothing was changed.' });
+      } else if (kind === 'ok' || kind === 'no') {
+        await interaction.followUp({ content: handlers.onApproval(payload, kind === 'ok', interaction.user.tag) });
       }
     } catch (err) {
       console.error(`unraid-watch: button handler failed: ${err.stack ?? err}`);

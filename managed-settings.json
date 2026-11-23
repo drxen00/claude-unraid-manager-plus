@@ -31,7 +31,8 @@
       "Bash(host ip -br addr show)",
       "Bash(host ip route)",
       "Bash(host ip -br link)",
-      "mcp__unraid"
+      "mcp__unraid",
+      "mcp__fix"
     ],
     "deny": [
       "Bash(rm -rf /)",
@@ -44,6 +45,9 @@
     ]
   },
   "disableAutoMode": "disable",
+  "env": {
+    "MCP_TOOL_TIMEOUT": "2700000"
+  },
   "allowManagedPermissionRulesOnly": true,
   "allowManagedHooksOnly": true,
   "hooks": {

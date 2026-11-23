@@ -38,11 +38,19 @@ export function loadConfig(env = process.env) {
     intervalMinutes: int(env.CHECK_INTERVAL, 15, 5, 240, 'CHECK_INTERVAL'),
     diskWarnPercent: int(env.DISK_WARN_PERCENT, 90, 50, 99, 'DISK_WARN_PERCENT'),
     ignore,
-    stateDir: env.WATCH_STATE_DIR || '/var/lib/unraid-watch',
+    // On the workspace mount so rules and the host-fix key survive an image
+    // update; root-only (main.mjs checks), so Claude's user cannot read it.
+    stateDir: env.WATCH_STATE_DIR || '/workspace/.unraid-watch',
     claudeUser: env.CLAUDE_USER || 'claude',
     claudeHome: env.CLAUDE_HOME || '/home/claude',
     claudeCwd: env.WATCH_CLAUDE_CWD || '/workspace/watch',
     claudeTimeoutMs: int(env.WATCH_CLAUDE_TIMEOUT, 300, 30, 1800, 'WATCH_CLAUDE_TIMEOUT') * 1000,
+    // Chat and Fix it runs wait for the owner's taps: up to 15 minutes each.
+    fixTimeoutMs: int(env.WATCH_FIX_TIMEOUT, 2700, 300, 7200, 'WATCH_FIX_TIMEOUT') * 1000,
+    fixSocket: env.UNRAID_FIX_SOCKET || '/run/unraid-watch/fix.sock',
+    claudeGid: int(env.CLAUDE_GID, 100, 0, 65535, 'CLAUDE_GID'),
+    sshHost: env.UNRAID_SSH_HOST || '',
+    sshPort: int(env.UNRAID_SSH_PORT, 22, 1, 65535, 'UNRAID_SSH_PORT'),
     hostChecks: Boolean(env.UNRAID_SSH_HOST),
     apiUrl: env.UNRAID_API_URL || '',
     apiKey: env.UNRAID_API_KEY || '',
