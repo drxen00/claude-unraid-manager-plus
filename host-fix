@@ -137,10 +137,10 @@ case "${w[0]}" in
     fi
     if $print; then echo "chown -R -h $a1 $real"; exit 0; fi
     # -h: change a symlink itself, never what it points to.
-    chown -R -h -- "$a1" "$real"
+    chown -R -h -- "$a1" "$ROOT$real"
     rc=$?
     echo "chown finished with exit code $rc"
-    ls -ldn -- "$real"
+    ls -ldn -- "$ROOT$real"
     exit "$rc" ;;
 
   *) refuse "unknown command '${w[0]}'" ;;
