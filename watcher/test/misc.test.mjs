@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { askClaude, chatPrompt, incidentPrompt, morningPrompt, parseReply } from '../src/claude.mjs';
+import { askClaude, chatPrompt, fixPrompt, incidentPrompt, morningPrompt, parseReply } from '../src/claude.mjs';
 import { loadConfig } from '../src/config.mjs';
-import { buttonRows, remainingRows } from '../src/discord.mjs';
+import { approvalRow, buttonRows, remainingRows } from '../src/discord.mjs';
 import { chunk, msUntil } from '../src/schedule.mjs';
 
 const OWNER = '184695080709324800';
@@ -17,6 +17,10 @@ test('config: required values, defaults, validation', () => {
   assert.equal(c.diskWarnPercent, 90);
   assert.deepEqual(c.ignore, ['a', 'b']);
   assert.equal(c.hostChecks, false);
+  assert.equal(c.stateDir, '/workspace/.unraid-watch');
+  assert.equal(c.fixTimeoutMs, 2_700_000);
+  assert.equal(c.fixSocket, '/run/unraid-watch/fix.sock');
+  assert.equal(c.sshPort, 22);
   assert.equal(loadConfig({ DISCORD_BOT_TOKEN: 't', DISCORD_USER_ID: OWNER, REPORT_TIME: 'OFF' }).reportTime, 'off');
   assert.throws(() => loadConfig({ DISCORD_BOT_TOKEN: 't', DISCORD_USER_ID: OWNER, REPORT_TIME: '8am' }), /HH:MM/);
   assert.throws(() => loadConfig({ DISCORD_BOT_TOKEN: 't', DISCORD_USER_ID: OWNER, CHECK_INTERVAL: '1' }), /5 to 240/);
@@ -74,6 +78,44 @@ test('prompts carry the rules and the data', () => {
     assert.match(p, /\[bot\] disk1 is 98% full\n\[owner\] snooze that/);
   }
   assert.match(chatPrompt('x', inc), /"id":"k"/);
+});
+
+test('reports may not fix; chat and Fix it get the fix rules', () => {
+  const inc = [{ key: 'container:sonarr:exited', title: 'sonarr crashed', severity: 'warning', detail: '', firstSeen: 0 }];
+  for (const p of [morningPrompt(inc), incidentPrompt(inc, inc)]) {
+    assert.match(p, /do not call the fix tools/);
+    assert.doesNotMatch(p, /Least invasive first/);
+  }
+  const chat = chatPrompt('sonarr says permission denied, fix it', inc);
+  assert.match(chat, /Least invasive first/);
+  assert.match(chat, /only when the owner asks you to fix/);
+  const fix = fixPrompt([{ id: 'container:sonarr:exited', problem: 'sonarr crashed' }]);
+  assert.match(fix, /tapped "Fix it"/);
+  assert.match(fix, /sonarr crashed/);
+  assert.match(fix, /appdata_chown/);
+  assert.doesNotMatch(fix, /do not call the fix tools/);
+});
+
+test('askClaude: chat and fix runs get the long timeout and more turns', async () => {
+  let seen;
+  const asClaude = async (_cfg, args, opts) => {
+    seen = { args, opts };
+    return { code: 0, stdout: JSON.stringify({ result: 'Fixed.', is_error: false }), stderr: '' };
+  };
+  const cfg = { claudeCwd: `${process.cwd()}/.tmp-watch-cwd`, claudeTimeoutMs: 1000, fixTimeoutMs: 9000 };
+  await askClaude(cfg, 'P', { asClaude, mode: 'fix' });
+  assert.equal(seen.opts.timeoutMs, 9000);
+  assert.equal(seen.args[seen.args.indexOf('--max-turns') + 1], '60');
+  await askClaude(cfg, 'P', { asClaude });
+  assert.equal(seen.opts.timeoutMs, 1000);
+  assert.equal(seen.args[seen.args.indexOf('--max-turns') + 1], '30');
+});
+
+test('approval buttons: Allow and Deny for one request; a click clears both', () => {
+  const row = approvalRow('abc').toJSON();
+  assert.deepEqual(row.components.map((c) => [c.custom_id, c.label]), [['ok:abc', 'Allow'], ['no:abc', 'Deny']]);
+  const asReceived = [{ components: row.components.map((c) => ({ ...c, customId: c.custom_id, toJSON: () => c })) }];
+  assert.deepEqual(remainingRows(asReceived, 'ok:abc'), []);
 });
 
 test('askClaude: runs claude -p as Claude user with the prompt on stdin', async () => {

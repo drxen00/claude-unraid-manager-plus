@@ -55,20 +55,66 @@ Quick versions without Claude:
 | `note don't mention parity` | A standing instruction for every report. |
 
 Muted problems are still checked, just not announced; `status` says how many
-are muted. Rules live in the container's own state (`/var/lib/unraid-watch`,
+are muted. Rules live in the watcher's state (`workspace/.unraid-watch`,
 root only), out of Claude's reach. They change only from your own messages
 or your taps: a rule Claude suggests in a report or an alert, rather than in
 reply to you, is only a button. The bot remembers the last 12 messages, so
 "that" means the message you're replying to.
+
+## Fixing things
+
+When an alert comes in, tap **🛠️ Fix it**, or just ask: "sonarr says
+permission denied, fix it", "plex won't start, can you sort it out?". Claude
+looks into it first (logs, settings), then asks before every single change:
+
+> 🛠️ **Claude wants to update sonarr**: pull the newest image and re-create
+> it from its Unraid template (like Update on the Docker tab; settings and
+> data stay)
+> Why: The log shows a crash that the newer version fixes.
+> **Allow** · **Deny**
+
+Nothing happens unless you tap **Allow**. No answer within 15 minutes counts
+as no. If you deny, Claude doesn't ask for the same thing again and tells you
+the other options. At the end it sends a short report: what was wrong, what
+it changed, and whether it works now.
+
+What Claude can do this way:
+
+| Fix | Needs |
+|---|---|
+| Start, stop or restart a container | Nothing extra |
+| Update a container (pull the newest image, re-create it from its template, exactly like **Update** on the Docker tab) | The host-fix setup below |
+| Fix the owner of a folder below a container's appdata folder (the usual cause of "permission denied") | The host-fix setup below |
+
+The same tools work from the Claude app (Remote Control): ask there, and the
+Allow / Deny question comes to Discord.
+
+### Host-fix setup (once, about 2 minutes)
+
+Updates and permission fixes run on the Unraid host through a second, tiny
+script, like the read-only checks: it can do only those two things, only for
+containers from the Docker tab and folders below appdata, never for this
+tool's own containers or data. Its SSH key belongs to the watcher (root), not
+to Claude. In the Unraid terminal:
+
+```
+docker exec -it claude-unraid-manager host-fix-setup
+```
+
+It prints the commands to copy the script to the USB stick, read it, and
+allow the key. "Unraid SSH host" must be set in the template (it already is
+if the read-only checks work). Restart the container; the log then says
+`unraid-watch: host fixes over SSH to … (host-fix 1)`.
 
 ## What it can and cannot do
 
 | | |
 |---|---|
 | Checks every 15 minutes | Plain scripts, no AI, no cost. |
-| Explanations and the morning report | Claude, read-only. It runs with nobody at the keyboard, so anything that would need your approval is refused automatically. Uses your Claude subscription. |
-| Buttons | Start, stop or restart **one container**, or change your rules (mute, alert, note). Nothing else exists. Each button works once, for 15 minutes, at most 5 fixes an hour, and only for your Discord account. The container's state is checked again right before it runs. Every click is logged in the container log (`unraid-watch audit:`). |
-| Never | Disks, array, parity, shares, the USB stick, Unraid settings, deleting anything. For those Claude tells you where to click in the Unraid web UI. The watcher can't touch Claude's own two containers either. |
+| Explanations and the morning report | Claude, look only: reports and alerts never change anything. Uses your Claude subscription. |
+| Fixes | Only when you ask or tap Fix it, only through the fix tools above, and only after you tap **Allow** for that exact change. One question at a time, at most 10 changes and 30 questions an hour. Every request and answer is logged (`unraid-watch audit:`). |
+| Buttons | Start, stop or restart **one container**, change your rules (mute, alert, note), or Fix it. Each button works once, for 15 minutes, and only for your Discord account. The container's state is checked again right before it runs. |
+| Never | Disks, array, parity, shares, the USB stick, Unraid settings, editing config files, deleting anything. For those Claude tells you where to click in the Unraid web UI. Claude's own two containers and their data are off limits too. |
 
 ## Setup (about 10 minutes)
 
@@ -132,7 +178,14 @@ first message with any problems it already sees.
   including the token and the Unraid API key, and Claude may run
   `docker inspect`. With the token Claude could post as the bot; it still
   cannot press your buttons, which only accept clicks from your account.
-- **Restarts.** Open problems are kept in memory and in the container; after
-  the container is re-created, problems that still exist are reported once
-  more.
+- **State.** Your rules, the audit log and the host-fix key live in
+  `appdata/claude-unraid-manager/workspace/.unraid-watch`, readable by root
+  only, so they survive updating the container. Claude's user owns the
+  workspace folder and could swap that folder for its own; the watcher
+  checks it once at start (a root-only folder, or it is moved aside) and from
+  then on only uses the folder it checked, and `host-fix-setup` refuses to
+  print a key from a folder that is not root's. Open problems are kept there
+  too; after a restart, problems that still exist are reported once more.
+- **One thing at a time.** Claude works on one job at a time: while it waits
+  for your Allow, a new alert's explanation waits its turn.
 - **Turn it off.** Empty the bot token field and apply.

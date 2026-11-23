@@ -106,6 +106,22 @@ case "$(unraid-mcp-config "$MANAGED_MCP" || echo failed)" in
   not-configured) echo "Unraid API: not configured (set Unraid API URL and Key in the template)." ;;
   *) echo "Warning: Unraid API MCP server could not be configured; see above." ;;
 esac
+
+# The fix tools (watcher/src/fix-mcp.mjs): Claude's only way to change
+# anything. The server holds no secrets; every call goes to the watcher's
+# socket and waits for the owner's Allow in Discord. Listed only when the
+# watcher runs, since nobody could approve anything otherwise.
+WATCH_DIR=/usr/local/share/claude-unraid-manager/watcher
+FIX_SOCKET_DIR=/run/unraid-watch
+DISCORD_OK=false
+if [ -n "${DISCORD_BOT_TOKEN:-}" ] && [[ "${DISCORD_USER_ID:-}" =~ ^[0-9]{17,20}$ ]]; then DISCORD_OK=true; fi
+if [ "$DISCORD_OK" = true ]; then
+  jq --arg node "$WATCH_DIR/node" --arg mcp "$WATCH_DIR/src/fix-mcp.mjs" --arg sock "$FIX_SOCKET_DIR/fix.sock" \
+    '.mcpServers.fix = {type: "stdio", command: $node, args: [$mcp], env: {UNRAID_FIX_SOCKET: $sock}}' \
+    "$MANAGED_MCP" > "$MANAGED_MCP.tmp" && mv "$MANAGED_MCP.tmp" "$MANAGED_MCP"
+else
+  jq 'del(.mcpServers.fix)' "$MANAGED_MCP" > "$MANAGED_MCP.tmp" && mv "$MANAGED_MCP.tmp" "$MANAGED_MCP"
+fi
 chmod 0644 "$MANAGED_MCP"
 
 # ── Read-only host checks over SSH ───────────────────────────────────────────
@@ -163,17 +179,25 @@ if ! as_claude tmux has-session -t "=$SESSION" 2>/dev/null; then
 fi
 
 # ── Discord watcher ──────────────────────────────────────────────────────────
-# Runs as root so Claude's user cannot read its bot token. It checks the
-# server without AI, asks Claude (claude -p, as Claude's user, read-only by the
-# managed settings) to explain problems, and sends everything to the owner's
-# Discord DM. Its buttons can only start, stop or restart a container.
-WATCH_DIR=/usr/local/share/claude-unraid-manager/watcher
+# Runs as root so Claude's user cannot read its bot token, its state or the
+# host-fix key. It checks the server without AI, asks Claude (claude -p, as
+# Claude's user) to explain problems, and sends everything to the owner's
+# Discord DM. Changes happen only through its buttons and the fix tools, each
+# after the owner's tap.
 if [ -n "${DISCORD_BOT_TOKEN:-}" ]; then
-  if ! [[ "${DISCORD_USER_ID:-}" =~ ^[0-9]{17,20}$ ]]; then
+  if [ "$DISCORD_OK" != true ]; then
     echo "Discord: bot token is set, but 'Discord user ID' is empty or not a number. Watcher not started."
   else
     mkdir -p /workspace/watch
     chown "$CLAUDE_USER":"$(id -g "$CLAUDE_USER")" /workspace/watch
+    # The watcher keeps its state (rules, audit log, host-fix key) in
+    # /workspace/.unraid-watch, root only. Claude's user owns /workspace and
+    # could swap that folder at any time, so the watcher checks and pins it
+    # itself (watcher/src/statedir.mjs); nothing here touches it by path.
+    # The socket the fix tools talk to: root and Claude's group only.
+    mkdir -p "$FIX_SOCKET_DIR"
+    chown root:"$(id -g "$CLAUDE_USER")" "$FIX_SOCKET_DIR"
+    chmod 0750 "$FIX_SOCKET_DIR"
     (
       if [ -n "${UNRAID_API_CA_BUNDLE:-}" ]; then export NODE_EXTRA_CA_CERTS="$UNRAID_API_CA_BUNDLE"; fi
       while true; do
@@ -188,6 +212,9 @@ if [ -n "${DISCORD_BOT_TOKEN:-}" ]; then
       done
     ) &
     echo "Discord: watcher running; reports go to your Discord DMs (morning report: ${REPORT_TIME:-08:00})."
+    if [ -z "${UNRAID_SSH_HOST:-}" ]; then
+      echo "Fixes: start/stop/restart work; updates and permission fixes need the host-fix setup: docker exec -it $(hostname) host-fix-setup"
+    fi
   fi
 else
   echo "Discord: not set up. Add a bot token and your Discord user ID in the template to get reports."

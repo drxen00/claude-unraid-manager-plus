@@ -1,0 +1,85 @@
+#!/bin/bash
+# host-fix-setup — the steps to allow the host fixes (update a container,
+# fix appdata ownership), each approved by the owner in Discord.
+#
+#   host-fix-setup                    print the steps
+#   host-fix-setup --authorized-key   print only the authorized_keys line
+#
+# Run as root (docker exec -it claude-unraid-manager host-fix-setup): the key
+# belongs to the Discord watcher, which runs as root, not to Claude's user.
+# The container never writes to the host itself: you run the printed commands
+# in the Unraid terminal, after reading the script they install.
+set -euo pipefail
+
+state=${WATCH_STATE_DIR:-/workspace/.unraid-watch}
+dispatcher=/boot/config/claude-unraid/host-fix
+container=$(hostname)
+
+if [ "$(id -u)" != 0 ]; then
+  echo "host-fix-setup: run it as root: docker exec -it $container host-fix-setup" >&2
+  exit 77
+fi
+# Claude's user owns /workspace and could put a folder of its own (with its
+# own key) in place of the watcher's. So: change into the folder first, then
+# check the folder we are in (that cannot be swapped any more) is root's and
+# private, and derive the public key from the private key in it.
+if [ -L "$state" ] || ! cd -P -- "$state" 2>/dev/null; then
+  echo "host-fix-setup: no watcher state folder yet. It is created when the Discord watcher" >&2
+  echo "host-fix-setup: is set up (Discord bot token and user ID in the template)." >&2
+  exit 69
+fi
+if [ "$(stat -c '%u %a' .)" != "0 700" ]; then
+  echo "host-fix-setup: $state is not a root-only folder ($(stat -c '%U %a' .)), so its key cannot be trusted." >&2
+  echo "host-fix-setup: restart the container; the watcher then moves it aside and makes a new one." >&2
+  exit 65
+fi
+if [ ! -f host-fix-key ] || [ -L host-fix-key ]; then
+  echo "host-fix-setup: no host-fix key yet; the watcher creates it when it starts. Check: docker logs $container" >&2
+  exit 69
+fi
+pub=$(ssh-keygen -y -f host-fix-key) || { echo "host-fix-setup: cannot read the host-fix key" >&2; exit 65; }
+line="restrict,command=\"/bin/bash $dispatcher\" $pub claude-unraid-manager-host-fix"
+
+if [ "${1:-}" = --authorized-key ]; then
+  printf '%s\n' "$line"
+  exit 0
+fi
+
+cat <<EOF
+Host fixes: setup
+
+With this, Claude can ask (and only after you tap Allow in Discord, every
+time) to:
+  - update a container the way the Docker tab does (pull, re-create)
+  - fix the owner of a folder below a container's appdata folder
+Nothing else: no array, disks, parity, shares or flash drive, and never this
+tool's own containers or data.
+
+Run these in the Unraid terminal as root (Unraid web UI, top right, terminal
+icon). The container does not do this for you.
+
+1. Copy the script to the flash drive and read it:
+
+   mkdir -p /boot/config/claude-unraid
+   docker cp $container:/usr/local/share/claude-unraid-manager/host-fix $dispatcher
+   less $dispatcher
+
+2. Allow the watcher's key to run that script and nothing else:
+
+   echo '$line' >> /root/.ssh/authorized_keys
+
+   On Unraid 6.9 and later /root/.ssh points to /boot/config/ssh/root, so this
+   survives reboots. Check with: ls -l /root/.ssh
+
+3. SSH must be on (Settings → Management Access → Use SSH: Yes), and
+   "Unraid SSH host" must be set in this container's template to the
+   server's LAN IP (the same setting the read-only checks use).
+
+4. Restart this container. The log then says:
+   unraid-watch: host fixes over SSH to <ip> (host-fix 1)
+
+   Test from Discord: ask "what host fixes can you do?", or tap Fix it on
+   the next alert. Every change still waits for your Allow.
+
+To undo: delete that line from /root/.ssh/authorized_keys.
+EOF

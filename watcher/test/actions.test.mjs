@@ -51,6 +51,7 @@ test('rule suggestions are validated and described by the watcher', () => {
     { action: 'watch.note', text: '' },
     { action: 'watch.remove', ids: ['m1; rm -rf /'] },
     { action: 'watch.undo', spec: { add: [{ id: 'm9', match: '*' }], remove: [] } },
+    { action: 'watch.fix', spec: { problems: [] } },
   ], containers, now);
   assert.deepEqual(bad, []);
   const rm = validateSuggestions([{ action: 'watch.remove', ids: ['M1', 'a2'] }], containers, now);
