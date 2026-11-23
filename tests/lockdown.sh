@@ -99,6 +99,8 @@ if [ "$(owner /run/claude-unraid/.env)" = "root:users 640" ]; then pass "key fil
 if as_claude 'echo x >> /run/claude-unraid/.env' 2>/dev/null; then fail "Claude's user can change the key file"; else pass "Claude's user cannot change the key file"; fi
 
 echo "lockdown: fix tools"
+# The watcher makes its state folder and key when it starts, a moment after Claude.
+for _ in $(seq 30); do in_c "test -f /workspace/.unraid-watch/host-fix-key" 2>/dev/null && break; sleep 1; done
 if printf '%s' "$mcp" | jq -e '.mcpServers.fix.command == "/usr/local/share/claude-unraid-manager/watcher/node" and (.mcpServers.fix.args[0] | endswith("fix-mcp.mjs"))' >/dev/null; then pass "managed MCP config has the fix server"; else fail "fix server entry: $mcp"; fi
 if in_c 'jq -e ".permissions.allow | index(\"mcp__fix\")" /etc/claude-code/managed-settings.json' >/dev/null; then pass "fix tools allowed by the managed settings"; else fail "mcp__fix not allowed"; fi
 if [ "$(owner /workspace/.unraid-watch)" = "root:root 700" ]; then pass "watcher state root-only 0700"; else fail "watcher state: $(owner /workspace/.unraid-watch)"; fi
@@ -107,6 +109,11 @@ if as_claude 'cat /workspace/.unraid-watch/host-fix-key' >/dev/null 2>&1; then f
 if [ "$(owner /run/unraid-watch)" = "root:users 750" ]; then pass "fix socket directory root:users 0750"; else fail "fix socket directory: $(owner /run/unraid-watch)"; fi
 if in_c 'host-fix-setup --authorized-key' | grep -q '^restrict,command="/bin/bash /boot/config/claude-unraid/host-fix" ssh-ed25519 '; then pass "host-fix-setup prints the forced-command line"; else fail "host-fix-setup line"; fi
 if as_claude 'host-fix-setup' >/dev/null 2>&1; then fail "host-fix-setup works as Claude's user"; else pass "host-fix-setup refuses Claude's user"; fi
+# Claude's user owns /workspace, so it can swap the state folder for one with its
+# own key. host-fix-setup must then refuse instead of printing that key.
+as_claude 'mv /workspace/.unraid-watch /workspace/.uw-real && mkdir -m 700 /workspace/.unraid-watch && ssh-keygen -q -t ed25519 -N "" -f /workspace/.unraid-watch/host-fix-key' >/dev/null 2>&1
+if in_c 'host-fix-setup --authorized-key' >/dev/null 2>&1; then fail "host-fix-setup trusts a folder planted by Claude's user"; else pass "host-fix-setup refuses a planted state folder"; fi
+as_claude 'rm -rf /workspace/.unraid-watch && mv /workspace/.uw-real /workspace/.unraid-watch' >/dev/null 2>&1
 # The fix server answers MCP and lists the tools; without a watcher socket (the
 # dummy token cannot log in) a call is refused, nothing is changed.
 mcp_out=$(as_claude 'printf "%s\n" "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\"}}" "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}" "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"container_restart\",\"arguments\":{\"name\":\"x\",\"reason\":\"test\"}}}" | timeout 20 /usr/local/share/claude-unraid-manager/watcher/node /usr/local/share/claude-unraid-manager/watcher/src/fix-mcp.mjs' 2>&1)

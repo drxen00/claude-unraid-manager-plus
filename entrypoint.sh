@@ -112,7 +112,6 @@ esac
 # socket and waits for the owner's Allow in Discord. Listed only when the
 # watcher runs, since nobody could approve anything otherwise.
 WATCH_DIR=/usr/local/share/claude-unraid-manager/watcher
-WATCH_STATE=/workspace/.unraid-watch
 FIX_SOCKET_DIR=/run/unraid-watch
 DISCORD_OK=false
 if [ -n "${DISCORD_BOT_TOKEN:-}" ] && [[ "${DISCORD_USER_ID:-}" =~ ^[0-9]{17,20}$ ]]; then DISCORD_OK=true; fi
@@ -191,25 +190,10 @@ if [ -n "${DISCORD_BOT_TOKEN:-}" ]; then
   else
     mkdir -p /workspace/watch
     chown "$CLAUDE_USER":"$(id -g "$CLAUDE_USER")" /workspace/watch
-    # State on the workspace mount (survives image updates), root only.
-    # Claude's user owns /workspace, so it could plant a folder or link here:
-    # anything that is not a real directory owned by root is moved aside and
-    # never adopted (rules and the host-fix key then start fresh).
-    if [ -L "$WATCH_STATE" ] || { [ -e "$WATCH_STATE" ] && { [ ! -d "$WATCH_STATE" ] || [ "$(stat -c %u "$WATCH_STATE")" != 0 ]; }; }; then
-      mv "$WATCH_STATE" "$WATCH_STATE.untrusted-$(date +%s)"
-      echo "Warning: $WATCH_STATE was not root's; moved aside. Rules and the host-fix key start fresh."
-    fi
-    mkdir -p "$WATCH_STATE"
-    chmod 0700 "$WATCH_STATE"
-    # Marks this appdata folder as the tool's own data, which host-fix never
-    # changes. Inside the root-only folder, so it cannot be a planted link.
-    : > "$WATCH_STATE/.claude-unraid-watch"
-    # The key for host fixes (update, chown); host-fix-setup prints the steps.
-    if [ ! -f "$WATCH_STATE/host-fix-key" ]; then
-      ssh-keygen -q -t ed25519 -N '' -C claude-unraid-manager-host-fix -f "$WATCH_STATE/host-fix-key" \
-        || echo "Warning: could not create the SSH key for host fixes."
-    fi
-    chmod 0600 "$WATCH_STATE/host-fix-key" 2>/dev/null || true
+    # The watcher keeps its state (rules, audit log, host-fix key) in
+    # /workspace/.unraid-watch, root only. Claude's user owns /workspace and
+    # could swap that folder at any time, so the watcher checks and pins it
+    # itself (watcher/src/statedir.mjs); nothing here touches it by path.
     # The socket the fix tools talk to: root and Claude's group only.
     mkdir -p "$FIX_SOCKET_DIR"
     chown root:"$(id -g "$CLAUDE_USER")" "$FIX_SOCKET_DIR"

@@ -55,7 +55,7 @@ Quick versions without Claude:
 | `note don't mention parity` | A standing instruction for every report. |
 
 Muted problems are still checked, just not announced; `status` says how many
-are muted. Rules live in the container's own state (`/var/lib/unraid-watch`,
+are muted. Rules live in the watcher's state (`workspace/.unraid-watch`,
 root only), out of Claude's reach. They change only from your own messages
 or your taps: a rule Claude suggests in a report or an alert, rather than in
 reply to you, is only a button. The bot remembers the last 12 messages, so
@@ -112,7 +112,7 @@ if the read-only checks work). Restart the container; the log then says
 |---|---|
 | Checks every 15 minutes | Plain scripts, no AI, no cost. |
 | Explanations and the morning report | Claude, look only: reports and alerts never change anything. Uses your Claude subscription. |
-| Fixes | Only when you ask or tap Fix it, only through the fix tools above, and only after you tap **Allow** for that exact change. At most 10 changes an hour. Every request and answer is logged (`unraid-watch audit:`). |
+| Fixes | Only when you ask or tap Fix it, only through the fix tools above, and only after you tap **Allow** for that exact change. One question at a time, at most 10 changes and 30 questions an hour. Every request and answer is logged (`unraid-watch audit:`). |
 | Buttons | Start, stop or restart **one container**, change your rules (mute, alert, note), or Fix it. Each button works once, for 15 minutes, and only for your Discord account. The container's state is checked again right before it runs. |
 | Never | Disks, array, parity, shares, the USB stick, Unraid settings, editing config files, deleting anything. For those Claude tells you where to click in the Unraid web UI. Claude's own two containers and their data are off limits too. |
 
@@ -180,7 +180,11 @@ first message with any problems it already sees.
   cannot press your buttons, which only accept clicks from your account.
 - **State.** Your rules, the audit log and the host-fix key live in
   `appdata/claude-unraid-manager/workspace/.unraid-watch`, readable by root
-  only, so they survive updating the container. Open problems are kept there
+  only, so they survive updating the container. Claude's user owns the
+  workspace folder and could swap that folder for its own; the watcher
+  checks it once at start (a root-only folder, or it is moved aside) and from
+  then on only uses the folder it checked, and `host-fix-setup` refuses to
+  print a key from a folder that is not root's. Open problems are kept there
   too; after a restart, problems that still exist are reported once more.
 - **One thing at a time.** Claude works on one job at a time: while it waits
   for your Allow, a new alert's explanation waits its turn.

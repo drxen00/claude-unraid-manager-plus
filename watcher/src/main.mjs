@@ -7,7 +7,7 @@
 // container's entrypoint as root, so Claude's user cannot read its Discord
 // token or its state; Claude itself runs as that user.
 import { randomBytes } from 'node:crypto';
-import { access, chmod, lstat, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { access, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { ActionBook, CATALOG, describeOffer, validateSuggestions } from './actions.mjs';
 import { askClaude, chatPrompt, fixPrompt, incidentPrompt, morningPrompt } from './claude.mjs';
@@ -21,6 +21,7 @@ import {
   mutedBy, normalizePrefs, parseMuteArgs, partition, removeRules, restoreRules, step, validIds,
 } from './rules.mjs';
 import { asClaude, run } from './run.mjs';
+import { pinStateDir } from './statedir.mjs';
 import { msUntil } from './schedule.mjs';
 
 const HELP = [
@@ -50,23 +51,8 @@ async function readJson(path, fallback) {
   }
 }
 
-// The state directory holds the owner's rules and the host-fix key. It sits
-// on the workspace mount, which Claude's user owns: a directory there that is
-// not root's and private could have been planted, so it is moved aside.
-async function secureDir(dir) {
-  const root = process.getuid?.() === 0;
-  try {
-    const st = await lstat(dir);
-    if (root && (!st.isDirectory() || st.uid !== 0 || (st.mode & 0o077) !== 0)) {
-      const aside = `${dir}.untrusted-${Date.now()}`;
-      await rename(dir, aside);
-      console.error(`unraid-watch: ${dir} was not root-only; moved it to ${aside} and started clean`);
-    }
-  } catch {
-    // Not there yet.
-  }
-  await mkdir(dir, { recursive: true, mode: 0o700 });
-  await chmod(dir, 0o700);
+async function exists(path) {
+  return access(path).then(() => true, () => false);
 }
 
 async function writeJson(path, value) {
@@ -83,9 +69,20 @@ async function main() {
     process.exit(2);
   }
 
-  await secureDir(cfg.stateDir);
-  const statePath = join(cfg.stateDir, 'state.json');
-  const prefsPath = join(cfg.stateDir, 'prefs.json');
+  // Every path below goes through the checked, open directory (statedir.mjs).
+  const stateDir = await pinStateDir(cfg.stateDir, { uid: process.getuid?.() ?? 0 });
+  // Marks this appdata folder as the tool's own data: host-fix never changes
+  // anything below a folder that has it.
+  await writeFile(join(stateDir, '.claude-unraid-watch'), 'claude-unraid-manager watcher state\n', { mode: 0o600 });
+  // The key for host fixes (update, chown); host-fix-setup prints the steps
+  // to allow it on the Unraid host. Only root (this process) can read it.
+  const hostFixKey = join(stateDir, 'host-fix-key');
+  if (!(await exists(hostFixKey))) {
+    const k = await run('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-C', 'claude-unraid-manager-host-fix', '-f', hostFixKey]);
+    if (k.code !== 0) console.error(`unraid-watch: could not create the host-fix key: ${(k.stderr || k.stdout).trim().slice(0, 200)}`);
+  }
+  const statePath = join(stateDir, 'state.json');
+  const prefsPath = join(stateDir, 'prefs.json');
   // First start or unreadable: start clean (open problems are re-reported).
   let state = await readJson(statePath, emptyState());
   if (!state || typeof state.open !== 'object') state = emptyState();
@@ -143,7 +140,7 @@ async function main() {
 
   const book = new ActionBook({
     run,
-    auditPath: join(cfg.stateDir, 'audit.jsonl'),
+    auditPath: join(stateDir, 'audit.jsonl'),
     local: {
       ...Object.fromEntries(
         ['watch.mute', 'watch.alert', 'watch.note', 'watch.remove', 'watch.undo'].map((a) => [a, async (o) => (await applyRule(o)).message]),
@@ -402,14 +399,13 @@ async function main() {
     return allow ? '👍 Allowed. Working on it…' : '👎 Denied. Nothing was changed.';
   }
 
-  // host-fix on the Unraid host, with the watcher's own key (entrypoint).
-  const hostFixKey = join(cfg.stateDir, 'host-fix-key');
-  const hostFixReady = Boolean(cfg.sshHost) && (await access(hostFixKey).then(() => true, () => false));
+  // host-fix on the Unraid host, with the watcher's own key (made above).
+  const hostFixReady = Boolean(cfg.sshHost) && (await exists(hostFixKey));
   const hostFix = hostFixReady
     ? (args, timeoutMs) => run('ssh', [
       '-T', '-i', hostFixKey, '-p', String(cfg.sshPort),
       '-o', 'BatchMode=yes', '-o', 'IdentitiesOnly=yes', '-o', 'ConnectTimeout=5', '-o', 'LogLevel=ERROR',
-      '-o', 'StrictHostKeyChecking=accept-new', '-o', `UserKnownHostsFile=${join(cfg.stateDir, 'known_hosts')}`,
+      '-o', 'StrictHostKeyChecking=accept-new', '-o', `UserKnownHostsFile=${join(stateDir, 'known_hosts')}`,
       `root@${cfg.sshHost}`, '--', args.join(' '),
     ], { timeoutMs })
     : null;

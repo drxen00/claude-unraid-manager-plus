@@ -3,7 +3,7 @@ import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { FIX_TOOLS, FixBroker, MAX_FIXES_PER_HOUR, serveFixSocket } from '../src/fix.mjs';
+import { FIX_TOOLS, FixBroker, MAX_ASKS_PER_HOUR, MAX_FIXES_PER_HOUR, serveFixSocket } from '../src/fix.mjs';
 import { callWatcher, handleMessage } from '../src/fix-mcp.mjs';
 
 const containers = [{ name: 'sonarr' }, { name: 'plex' }, { name: 'claude-unraid-manager' }];
@@ -146,4 +146,40 @@ test('socket round trip: request in, broker answer out', { skip: process.platfor
   } finally {
     server.close();
   }
+});
+
+test('one question to the owner at a time, and a cap on questions an hour', async () => {
+  let release;
+  const { b, calls } = await broker({ decision: () => new Promise((r) => { release = r; }) });
+  const first = b.handle({ tool: 'container_restart', args: { name: 'sonarr', reason: 'r' } });
+  await new Promise((r) => setImmediate(r));
+  const second = await b.handle({ tool: 'container_restart', args: { name: 'plex', reason: 'r' } });
+  assert.equal(second.ok, false);
+  assert.match(second.text, /still waiting for the owner/);
+  release('deny');
+  assert.equal((await first).ok, false);
+  assert.equal(calls.asked.length, 1);
+
+  // Denied questions count too, so a looping run cannot flood the DMs.
+  const t = await broker({ decision: 'deny' });
+  for (let i = 0; i < MAX_ASKS_PER_HOUR; i++) await t.b.handle({ tool: 'container_restart', args: { name: 'sonarr', reason: 'r' } });
+  const over = await t.b.handle({ tool: 'container_restart', args: { name: 'sonarr', reason: 'r' } });
+  assert.match(over.text, /requests to the owner an hour/);
+  assert.equal(t.calls.asked.length, MAX_ASKS_PER_HOUR);
+  t.tick(3_600_001);
+  await t.b.handle({ tool: 'container_restart', args: { name: 'sonarr', reason: 'r' } });
+  assert.equal(t.calls.asked.length, MAX_ASKS_PER_HOUR + 1);
+});
+
+test('a Discord error while asking changes nothing; a failed result message does not hide the result', async () => {
+  let t = await broker({ decision: () => { throw new Error('discord down'); } });
+  let r = await t.b.handle({ tool: 'container_restart', args: { name: 'sonarr', reason: 'r' } });
+  assert.equal(r.ok, false);
+  assert.match(r.text, /could not be sent/);
+  assert.deepEqual(t.calls.run, []);
+  // The broker is free again afterwards.
+  t = await broker();
+  t.b.notify = async () => { throw new Error('discord down'); };
+  r = await t.b.handle({ tool: 'container_restart', args: { name: 'sonarr', reason: 'r' } });
+  assert.deepEqual(r, { ok: true, text: 'Restarted sonarr.' });
 });

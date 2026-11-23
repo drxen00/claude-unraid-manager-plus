@@ -16,6 +16,9 @@ const SEG = '[A-Za-z0-9_.@+=,:-]+';
 const APPDATA_PATH = new RegExp(`^/mnt/[A-Za-z0-9_.-]+/[A-Za-z0-9_-]+/${SEG}(/${SEG})*$`);
 export const APPROVAL_MS = 15 * 60_000;
 export const MAX_FIXES_PER_HOUR = 10;
+// Questions to the owner, allowed or not: keeps a looping run from flooding
+// their DMs.
+export const MAX_ASKS_PER_HOUR = 30;
 
 const nameArg = { type: 'string', description: 'The container name exactly as docker ps shows it.' };
 const reasonArg = { type: 'string', description: 'One plain sentence for the owner: why this helps. They see it before they decide.' };
@@ -105,6 +108,8 @@ export class FixBroker {
   constructor({ askOwner, run, hostFix, audit, containers = () => [], policy = () => ({ source: '' }), now = () => Date.now(), notify = async () => {} }) {
     Object.assign(this, { askOwner, run, hostFix, audit, containers, policy, now, notify });
     this.done = [];
+    this.asked = [];
+    this.waiting = false;
   }
 
   async handle(req) {
@@ -121,16 +126,30 @@ export class FixBroker {
     const hourAgo = this.now() - 3_600_000;
     this.done = this.done.filter((t) => t > hourAgo);
     if (this.done.length >= MAX_FIXES_PER_HOUR) return { ok: false, text: `Limit reached: at most ${MAX_FIXES_PER_HOUR} changes an hour. Nothing was changed.` };
+    this.asked = this.asked.filter((t) => t > hourAgo);
+    if (this.asked.length >= MAX_ASKS_PER_HOUR) return { ok: false, text: `Limit reached: at most ${MAX_ASKS_PER_HOUR} requests to the owner an hour. Nothing was changed.` };
+    // One question at a time: the owner decides on one change, then the next.
+    if (this.waiting) return { ok: false, text: 'Another change is still waiting for the owner. Wait for that answer, then ask again. Nothing was changed.' };
 
     const reason = String(req.args?.reason ?? '').replace(/\s+/g, ' ').trim().slice(0, 300);
     const what = tool.what(c.args);
-    const decision = await this.askOwner({ tool: name, what, reason, source: p.source });
+    this.asked.push(this.now());
+    this.waiting = true;
+    let decision;
+    try {
+      decision = await this.askOwner({ tool: name, what, reason, source: p.source });
+    } catch (err) {
+      decision = 'error';
+      console.error(`unraid-watch: could not ask the owner: ${err.message ?? err}`);
+    } finally {
+      this.waiting = false;
+    }
     const entry = { action: `fix.${name}`, target: c.args.name ?? c.args.path, args: c.args, reason };
     if (decision !== 'allow') {
-      await this.audit({ who: 'owner', ...entry, result: decision === 'deny' ? 'denied' : 'no answer' });
-      return decision === 'deny'
-        ? { ok: false, text: 'The owner tapped Deny. Nothing was changed. Do not ask for the same change again; explain other options instead.' }
-        : { ok: false, text: 'The owner did not answer within 15 minutes. Nothing was changed.' };
+      await this.audit({ who: 'owner', ...entry, result: { deny: 'denied', error: 'not asked (Discord error)' }[decision] ?? 'no answer' });
+      if (decision === 'deny') return { ok: false, text: 'The owner tapped Deny. Nothing was changed. Do not ask for the same change again; explain other options instead.' };
+      if (decision === 'error') return { ok: false, text: 'The question could not be sent to the owner on Discord. Nothing was changed.' };
+      return { ok: false, text: 'The owner did not answer within 15 minutes. Nothing was changed.' };
     }
     this.done.push(this.now());
     let r;
@@ -140,7 +159,11 @@ export class FixBroker {
       r = { ok: false, text: String(err.message ?? err) };
     }
     await this.audit({ who: 'owner', ...entry, result: r.ok ? 'ok' : 'failed', output: r.text.slice(-300) });
-    await this.notify(`${r.ok ? '✅' : '⚠️'} ${what.replace(/\*\*/g, '')}: ${r.ok ? 'done' : 'failed'}.\n${'```'}\n${r.text.slice(-800)}\n${'```'}`);
+    try {
+      await this.notify(`${r.ok ? '✅' : '⚠️'} ${what.replace(/\*\*/g, '')}: ${r.ok ? 'done' : 'failed'}.\n${'```'}\n${r.text.slice(-800).replace(/```/g, "'''")}\n${'```'}`);
+    } catch (err) {
+      console.error(`unraid-watch: could not report a fix result: ${err.message ?? err}`);
+    }
     return r;
   }
 }
