@@ -136,12 +136,23 @@ export function notificationFindings(list) {
   return out;
 }
 
+// Every unread notification, info included, for "tell me when Unraid says …"
+// rules: id, subject, and one text to match against.
+export function notificationFacts(list) {
+  return (list ?? []).map((n) => {
+    const subject = String(n.subject || n.title || 'Unraid notification').slice(0, 200);
+    return { id: String(n.id), subject, text: `${n.title ?? ''} ${n.subject ?? ''} ${n.description ?? ''}`.replace(/\s+/g, ' ').trim().slice(0, 1000) };
+  });
+}
+
 // ── Collectors: run the commands, return findings plus failed sources ────────
 
 export async function collect(cfg, { run, asClaude, fetchFn = fetch }) {
   const findings = [];
   const failed = new Map();
   const containers = [];
+  // Raw facts for the owner's rules (rules.mjs); null = not checked this run.
+  const facts = { containers: null, disks: null, md: null, notifications: null };
 
   // Containers
   const ps = await run('docker', ['ps', '-a', '--format', '{{json .}}'], { timeoutMs: 30_000 });
@@ -163,12 +174,16 @@ export async function collect(cfg, { run, asClaude, fetchFn = fetch }) {
   // Array and disk fill, through the read-only host checks
   if (cfg.hostChecks) {
     const md = await asClaude(cfg, ['host', 'mdcmd', 'status'], { timeoutMs: 30_000 });
-    if (md.code === 0) findings.push(...arrayFindings(parseMdcmd(md.stdout)));
-    else failed.set('array', (md.stderr || md.stdout).trim().slice(0, 300));
+    if (md.code === 0) {
+      facts.md = parseMdcmd(md.stdout);
+      findings.push(...arrayFindings(facts.md));
+    } else failed.set('array', (md.stderr || md.stdout).trim().slice(0, 300));
 
     const df = await asClaude(cfg, ['host', 'df', '-h'], { timeoutMs: 30_000 });
-    if (df.code === 0) findings.push(...diskFindings(parseDf(df.stdout), cfg.diskWarnPercent));
-    else failed.set('disks', (df.stderr || df.stdout).trim().slice(0, 300));
+    if (df.code === 0) {
+      facts.disks = parseDf(df.stdout);
+      findings.push(...diskFindings(facts.disks, cfg.diskWarnPercent));
+    } else failed.set('disks', (df.stderr || df.stdout).trim().slice(0, 300));
   }
 
   // Unraid notifications through the read-only API key
@@ -182,11 +197,14 @@ export async function collect(cfg, { run, asClaude, fetchFn = fetch }) {
       });
       const body = await res.json();
       if (!res.ok || body.errors) throw new Error(body.errors?.[0]?.message ?? `HTTP ${res.status}`);
-      findings.push(...notificationFindings(body.data?.notifications?.list));
+      const list = body.data?.notifications?.list ?? [];
+      findings.push(...notificationFindings(list));
+      facts.notifications = notificationFacts(list);
     } catch (err) {
       failed.set('notifications', String(err.message ?? err).slice(0, 300));
     }
   }
 
-  return { findings, failed, containers };
+  facts.containers = failed.has('containers') ? null : containers;
+  return { findings, failed, containers, facts };
 }

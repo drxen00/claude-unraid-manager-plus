@@ -12,8 +12,14 @@ import {
   GatewayIntentBits,
   Partials,
 } from 'discord.js';
-import { CATALOG } from './actions.mjs';
+import { buttonLabel } from './actions.mjs';
 import { chunk } from './schedule.mjs';
+
+function buttonStyle(action) {
+  if (action === 'container.stop') return ButtonStyle.Danger;
+  if (action.startsWith('watch.')) return ButtonStyle.Success;
+  return ButtonStyle.Primary;
+}
 
 export function buttonRows(offers) {
   if (!offers.length) return [];
@@ -22,8 +28,8 @@ export function buttonRows(offers) {
     row.addComponents(
       new ButtonBuilder()
         .setCustomId(`fix:${o.id}`)
-        .setLabel(`${CATALOG[o.action].label} ${o.target}`.slice(0, 80))
-        .setStyle(o.action === 'container.stop' ? ButtonStyle.Danger : ButtonStyle.Primary),
+        .setLabel(buttonLabel(o))
+        .setStyle(buttonStyle(o.action)),
     );
   }
   row.addComponents(

@@ -109,6 +109,10 @@ test('collect: runs fixed commands, reports failed sources', async () => {
   assert.equal(res.failed.get('disks'), 'host checks not set up');
   assert.equal(res.failed.has('array'), false);
   assert.equal(res.containers.length, 11);
+  assert.equal(res.facts.md.mdState, 'STARTED');
+  assert.equal(res.facts.disks, null, 'failed source is unknown, not empty');
+  assert.equal(res.facts.containers.length, 11);
+  assert.deepEqual(res.facts.notifications.map((n) => n.id), ['n']);
 });
 
 test('collect: skips host checks and API when not configured', async () => {

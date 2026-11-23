@@ -1,43 +1,128 @@
 // The only things a Discord button can do: start, stop or restart one
-// container. Claude may suggest them; it never runs them. A button runs a
-// fixed command owned by this file, after the owner taps it, within 15
+// container, or change the watcher's own rules (mute, alert, note; see
+// rules.mjs). Claude may suggest them; it never runs them. A container button
+// runs a fixed command owned by this file, after the owner taps it, within 15
 // minutes, at most a few times an hour, and only after re-checking that the
 // container is still in the state the suggestion was made for.
 import { randomBytes } from 'node:crypto';
 import { appendFile, mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { OWN_CONTAINERS } from './checks.mjs';
+import { describeRule, validCondition, validIds, validMatch, validText, validTime } from './rules.mjs';
 
 export const CATALOG = {
   'container.restart': { verb: 'restart', label: 'Restart', done: 'restarted', needs: (s) => s === 'running' || s === 'restarting' || s === 'exited' },
   'container.start': { verb: 'start', label: 'Start', done: 'started', needs: (s) => s === 'exited' || s === 'created' },
   'container.stop': { verb: 'stop', label: 'Stop', done: 'stopped', needs: (s) => s === 'running' || s === 'restarting' },
+  // Local: carried out by the watcher itself (ActionBook's `local`), no docker.
+  'watch.mute': { local: true },
+  'watch.alert': { local: true },
+  'watch.note': { local: true },
+  'watch.remove': { local: true },
+  // Only ever created by the watcher (the Undo button), never accepted from Claude.
+  'watch.undo': { local: true, internal: true },
 };
 
+export function buttonLabel(o) {
+  switch (o.action) {
+    case 'watch.mute': return `🔕 Mute ${o.target}`.slice(0, 80);
+    case 'watch.alert': return '🔔 Set this alert';
+    case 'watch.note': return '📝 Remember this note';
+    case 'watch.remove': return `🗑️ Remove ${o.target}`.slice(0, 80);
+    case 'watch.undo': return '↩️ Undo';
+    default: return `${CATALOG[o.action].label} ${o.target}`.slice(0, 80);
+  }
+}
+
+// What a rule button will do exactly, written by the watcher (not by Claude)
+// under the message, so the owner sees it before tapping.
+export function describeOffer(o) {
+  if (o.action === 'watch.remove') return `🗑️ **Remove** rule${o.spec.ids.length === 1 ? '' : 's'} ${o.spec.ids.map((i) => `\`${i}\``).join(', ')}`;
+  if (o.action === 'watch.undo' || !o.action.startsWith('watch.')) return '';
+  return describeRule(o.spec);
+}
+
 const NAME = /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/;
+const DAY = 86_400_000;
 export const EXPIRY_MS = 15 * 60_000;
 export const MAX_PER_HOUR = 5;
 export const MAX_SUGGESTIONS = 3;
 
-// Keep only well-formed suggestions for containers that exist right now.
-export function validateSuggestions(list, containers) {
+function ruleSuggestion(s, now) {
+  switch (s.action) {
+    case 'watch.mute': {
+      const match = validMatch(s.match ?? s.target);
+      if (!match || /^array:/i.test(match)) return null;
+      let until = null;
+      if (s.until !== undefined && s.until !== null) {
+        until = validTime(s.until, now);
+        if (until === null) return null;
+      } else if (s.days !== undefined && s.days !== null) {
+        const d = Number(s.days);
+        if (!Number.isInteger(d) || d < 1 || d > 365) return null;
+        until = now + d * DAY;
+      }
+      const raw = s.until_when ?? s.untilWhen;
+      const untilWhen = raw ? validCondition(raw, now) : null;
+      if (raw && !untilWhen) return null;
+      return { target: match, spec: { match, until, untilWhen } };
+    }
+    case 'watch.alert': {
+      const when = validCondition(s.when, now);
+      if (!when) return null;
+      const expires = s.expires ? validTime(s.expires, now) : null;
+      if (s.expires && expires === null) return null;
+      return { target: 'alert', spec: { when, say: validText(s.message ?? s.say, 200) ?? '', repeat: s.repeat === true, expires } };
+    }
+    case 'watch.note': {
+      const text = validText(s.text);
+      return text ? { target: 'note', spec: { text } } : null;
+    }
+    case 'watch.remove': {
+      const ids = validIds(s.ids ?? s.target);
+      return ids ? { target: ids.join(', '), spec: { ids } } : null;
+    }
+    default:
+      return null;
+  }
+}
+
+// Keep only well-formed suggestions: rules the watcher can check, and
+// container actions for containers that exist right now.
+export function validateSuggestions(list, containers, now = Date.now()) {
   const names = new Set(containers.map((c) => c.name));
   const out = [];
+  const seen = new Set();
   for (const s of Array.isArray(list) ? list : []) {
     if (out.length >= MAX_SUGGESTIONS) break;
     if (!s || typeof s !== 'object') continue;
     const action = String(s.action ?? '');
-    const target = String(s.target ?? '');
-    if (!CATALOG[action] || !NAME.test(target) || OWN_CONTAINERS.has(target) || !names.has(target)) continue;
-    if (out.some((o) => o.action === action && o.target === target)) continue;
-    out.push({ action, target, reason: String(s.reason ?? '').slice(0, 200) });
+    const reason = String(s.reason ?? '').slice(0, 200);
+    if (!CATALOG[action] || CATALOG[action].internal) continue;
+    let item;
+    if (CATALOG[action].local) {
+      const r = ruleSuggestion({ ...s, action }, now);
+      if (!r) continue;
+      item = { action, ...r, reason };
+    } else {
+      const target = String(s.target ?? '');
+      if (!NAME.test(target) || OWN_CONTAINERS.has(target) || !names.has(target)) continue;
+      item = { action, target, reason };
+    }
+    const key = JSON.stringify([action, item.target, item.spec]);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(item);
   }
   return out;
 }
 
 export class ActionBook {
-  constructor({ run, auditPath, now = () => Date.now() }) {
+  // local: { 'watch.mute': async (offer) => message, ... } for the actions
+  // the watcher carries out itself.
+  constructor({ run, auditPath, now = () => Date.now(), local = {} }) {
     this.run = run;
+    this.local = local;
     this.auditPath = auditPath;
     this.now = now;
     this.pending = new Map();
@@ -76,6 +161,20 @@ export class ActionBook {
       await this.audit({ who, action: offer.action, target: offer.target, result: 'expired' });
       return { ok: false, message: 'That button expired (15 minutes). Nothing was changed. Ask me again if it still needs fixing.' };
     }
+    const entry = CATALOG[offer.action];
+    if (entry.local) {
+      const fn = this.local[offer.action];
+      try {
+        if (!fn) throw new Error('not available');
+        const message = await fn(offer);
+        await this.audit({ who, action: offer.action, target: offer.target, spec: offer.spec, result: 'ok' });
+        return { ok: true, message };
+      } catch (err) {
+        await this.audit({ who, action: offer.action, target: offer.target, result: `failed (${err.message})` });
+        return { ok: false, message: `Could not do that: ${err.message}` };
+      }
+    }
+
     const hourAgo = this.now() - 3_600_000;
     this.executed = this.executed.filter((t) => t > hourAgo);
     if (this.executed.length >= MAX_PER_HOUR) {
@@ -83,7 +182,6 @@ export class ActionBook {
       return { ok: false, message: `Limit reached: at most ${MAX_PER_HOUR} fixes an hour from Discord. Nothing was changed.` };
     }
 
-    const entry = CATALOG[offer.action];
     const state = await this.run('docker', ['inspect', '--format', '{{.State.Status}}', offer.target], { timeoutMs: 15_000 });
     if (state.code !== 0) {
       await this.audit({ who, action: offer.action, target: offer.target, result: 'gone' });
