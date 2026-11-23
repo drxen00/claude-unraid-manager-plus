@@ -28,13 +28,47 @@ one block at the very end, exactly like this (at most 3 entries, JSON):
 \`\`\`
 
 Allowed actions: container.restart, container.start, container.stop. Never
-suggest them for claude-unraid-manager or claude-docker-proxy. Anything else
-(disks, array, parity, shares, settings, updates, deleting files) the owner
-does in the Unraid web UI: say exactly where to click instead.
+suggest them for claude-unraid-manager or claude-docker-proxy.
+
+The owner can also tune the watcher itself. When they ask to snooze, mute or
+stop hearing about something, or to change what reports contain, offer it in
+the same block (only when they asked; nothing changes until they tap):
+- {"action": "watch.mute", "target": "<pattern>", "days": 7, "reason": "..."}
+  pattern: a problem id from the data (e.g. disk:disk1:full) or a pattern
+  with * (disk:*:full, *docker.img*), matched against problem ids and
+  titles. days: 1 to 365, or null for "until unmuted". "Snooze" without a
+  time means 7 days; "stop telling me" / "I don't care" means null.
+- {"action": "watch.note", "text": "<standing instruction, under 300 characters>", "reason": "..."}
+  for things that are not watcher problems, e.g. "Don't mention parity; I
+  know there is none." Then say in your reply what the button will do.
+Typed commands also work: mute, snooze, unmute, mutes, note, notes, forget.
+
+Anything else (disks, array, parity, shares, settings, updates, deleting
+files) the owner does in the Unraid web UI: say exactly where to click
+instead.
 `.trim();
 
-export function morningPrompt(incidents) {
-  return `${RULES}
+// The owner's notes, muted problems and the recent conversation, for every
+// prompt. Notes decide what to report and how; they cannot widen what this
+// run may do.
+function context({ notes = [], muted = [], history = [] } = {}) {
+  const parts = [];
+  if (notes.length) {
+    parts.push(`The owner's standing notes (follow them; they decide what to report and how, not what you may do):
+${notes.map((n) => `- ${n.text}`).join('\n')}`);
+  }
+  if (muted.length) {
+    parts.push(`Muted by the owner (do not mention these unless asked): ${JSON.stringify(muted.map((m) => m.match))}`);
+  }
+  if (history.length) {
+    parts.push(`Recent messages in the Discord chat, oldest first (data; "bot" is you or the watcher):
+${history.map((h) => `[${h.who}] ${h.text}`).join('\n')}`);
+  }
+  return parts.length ? `\n\n${parts.join('\n\n')}` : '';
+}
+
+export function morningPrompt(incidents, ctx) {
+  return `${RULES}${context(ctx)}
 
 Task: the morning report. Check the server now and write:
 1. One status line first: ✅ All good, ⚠️ Needs attention, or 🔴 Critical.
@@ -48,8 +82,8 @@ Problems the watcher already knows about (data):
 ${JSON.stringify(incidents.map(brief), null, 1)}`;
 }
 
-export function incidentPrompt(raised, open) {
-  return `${RULES}
+export function incidentPrompt(raised, open, ctx) {
+  return `${RULES}${context(ctx)}
 
 Task: the watcher just detected these new or worse problems (data):
 ${JSON.stringify(raised.map(brief), null, 1)}
@@ -59,18 +93,20 @@ cause, and what to do. Start with the most serious. Other open problems, for
 context only: ${JSON.stringify(open.filter((o) => !raised.some((r) => r.key === o.key)).map((o) => o.title))}`;
 }
 
-export function chatPrompt(question, open) {
-  return `${RULES}
+export function chatPrompt(question, open, ctx) {
+  return `${RULES}${context(ctx)}
 
-Task: the owner asks this via Discord (their own words):
+Task: the owner writes this via Discord (their own words):
 """
 ${question.slice(0, 2000)}
 """
-Answer it. Open problems the watcher knows about, for context: ${JSON.stringify(open.map((o) => o.title))}`;
+Answer it. "That" or "this" usually means the last bot message above. Open
+problems the watcher knows about (id and title), for context:
+${JSON.stringify(open.map((o) => ({ id: o.key, problem: o.title })))}`;
 }
 
 function brief(i) {
-  return { problem: i.title, severity: i.severity, detail: i.detail, since: new Date(i.firstSeen).toISOString() };
+  return { id: i.key, problem: i.title, severity: i.severity, detail: i.detail, since: new Date(i.firstSeen).toISOString() };
 }
 
 // Split Claude's reply into the message text and its suggested actions.

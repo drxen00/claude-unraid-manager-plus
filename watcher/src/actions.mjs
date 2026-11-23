@@ -1,18 +1,37 @@
 // The only things a Discord button can do: start, stop or restart one
-// container. Claude may suggest them; it never runs them. A button runs a
-// fixed command owned by this file, after the owner taps it, within 15
-// minutes, at most a few times an hour, and only after re-checking that the
-// container is still in the state the suggestion was made for.
+// container, or change the watcher's own preferences (mute a problem, keep a
+// note). Claude may suggest them; it never runs them. A button runs a fixed
+// command owned by this file, after the owner taps it, within 15 minutes, at
+// most a few times an hour, and only after re-checking that the container is
+// still in the state the suggestion was made for.
 import { randomBytes } from 'node:crypto';
 import { appendFile, mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { OWN_CONTAINERS } from './checks.mjs';
+import { daysText, validDays, validMatch, validNote } from './prefs.mjs';
 
 export const CATALOG = {
   'container.restart': { verb: 'restart', label: 'Restart', done: 'restarted', needs: (s) => s === 'running' || s === 'restarting' || s === 'exited' },
   'container.start': { verb: 'start', label: 'Start', done: 'started', needs: (s) => s === 'exited' || s === 'created' },
   'container.stop': { verb: 'stop', label: 'Stop', done: 'stopped', needs: (s) => s === 'running' || s === 'restarting' },
+  // Local: carried out by the watcher itself (ActionBook's `local`), no docker.
+  'watch.mute': { local: true },
+  'watch.note': { local: true },
 };
+
+export function buttonLabel(o) {
+  if (o.action === 'watch.mute') return `🔕 Mute ${o.target} (${daysText(o.days)})`.slice(0, 80);
+  if (o.action === 'watch.note') return '📝 Remember this note';
+  return `${CATALOG[o.action].label} ${o.target}`.slice(0, 80);
+}
+
+// What a preference button will do exactly, written by the watcher (not by
+// Claude) under the message, so the owner sees it before tapping.
+export function describeOffer(o) {
+  if (o.action === 'watch.mute') return `🔕 **Mute** \`${o.target}\` for ${daysText(o.days)}: no alerts for problems whose id or title matches it.`;
+  if (o.action === 'watch.note') return `📝 **Note** for every report: "${o.text}"`;
+  return '';
+}
 
 const NAME = /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/;
 export const EXPIRY_MS = 15 * 60_000;
@@ -27,17 +46,34 @@ export function validateSuggestions(list, containers) {
     if (out.length >= MAX_SUGGESTIONS) break;
     if (!s || typeof s !== 'object') continue;
     const action = String(s.action ?? '');
+    const reason = String(s.reason ?? '').slice(0, 200);
+    if (action === 'watch.mute') {
+      const target = validMatch(s.target);
+      const d = validDays(s.days);
+      if (!target || !d.ok || out.some((o) => o.action === action && o.target === target)) continue;
+      out.push({ action, target, days: d.days, reason });
+      continue;
+    }
+    if (action === 'watch.note') {
+      const text = validNote(s.text);
+      if (!text || out.some((o) => o.action === action && o.text === text)) continue;
+      out.push({ action, target: 'note', text, reason });
+      continue;
+    }
     const target = String(s.target ?? '');
-    if (!CATALOG[action] || !NAME.test(target) || OWN_CONTAINERS.has(target) || !names.has(target)) continue;
+    if (!CATALOG[action] || CATALOG[action].local || !NAME.test(target) || OWN_CONTAINERS.has(target) || !names.has(target)) continue;
     if (out.some((o) => o.action === action && o.target === target)) continue;
-    out.push({ action, target, reason: String(s.reason ?? '').slice(0, 200) });
+    out.push({ action, target, reason });
   }
   return out;
 }
 
 export class ActionBook {
-  constructor({ run, auditPath, now = () => Date.now() }) {
+  // local: { 'watch.mute': async (offer) => message, ... } for the actions
+  // the watcher carries out itself.
+  constructor({ run, auditPath, now = () => Date.now(), local = {} }) {
     this.run = run;
+    this.local = local;
     this.auditPath = auditPath;
     this.now = now;
     this.pending = new Map();
@@ -76,6 +112,20 @@ export class ActionBook {
       await this.audit({ who, action: offer.action, target: offer.target, result: 'expired' });
       return { ok: false, message: 'That button expired (15 minutes). Nothing was changed. Ask me again if it still needs fixing.' };
     }
+    const entry = CATALOG[offer.action];
+    if (entry.local) {
+      const fn = this.local[offer.action];
+      try {
+        if (!fn) throw new Error('not available');
+        const message = await fn(offer);
+        await this.audit({ who, action: offer.action, target: offer.target, text: offer.text, days: offer.days, result: 'ok' });
+        return { ok: true, message };
+      } catch (err) {
+        await this.audit({ who, action: offer.action, target: offer.target, result: `failed (${err.message})` });
+        return { ok: false, message: `Could not do that: ${err.message}` };
+      }
+    }
+
     const hourAgo = this.now() - 3_600_000;
     this.executed = this.executed.filter((t) => t > hourAgo);
     if (this.executed.length >= MAX_PER_HOUR) {
@@ -83,7 +133,6 @@ export class ActionBook {
       return { ok: false, message: `Limit reached: at most ${MAX_PER_HOUR} fixes an hour from Discord. Nothing was changed.` };
     }
 
-    const entry = CATALOG[offer.action];
     const state = await this.run('docker', ['inspect', '--format', '{{.State.Status}}', offer.target], { timeoutMs: 15_000 });
     if (state.code !== 0) {
       await this.audit({ who, action: offer.action, target: offer.target, result: 'gone' });

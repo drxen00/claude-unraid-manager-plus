@@ -3,7 +3,7 @@ import { mkdtemp, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { ActionBook, EXPIRY_MS, MAX_PER_HOUR, validateSuggestions } from '../src/actions.mjs';
+import { ActionBook, buttonLabel, describeOffer, EXPIRY_MS, MAX_PER_HOUR, validateSuggestions } from '../src/actions.mjs';
 
 const containers = [{ name: 'plex' }, { name: 'sonarr' }, { name: 'claude-docker-proxy' }, { name: 'claude-unraid-manager' }];
 
@@ -23,6 +23,42 @@ test('only catalog actions on existing, non-own containers survive', () => {
   assert.deepEqual(v.map((s) => `${s.action} ${s.target}`), ['container.restart plex', 'container.stop sonarr']);
   assert.equal(v[1].reason.length, 200);
   assert.deepEqual(validateSuggestions('not a list', containers), []);
+});
+
+test('mute and note suggestions are validated and described by the watcher', () => {
+  const v = validateSuggestions([
+    { action: 'watch.mute', target: 'disk:*:full', days: 30, reason: 'owner asked' },
+    { action: 'watch.mute', target: '*', days: null },
+    { action: 'watch.mute', target: 'x', days: 9999 },
+    { action: 'watch.note', text: "Don't mention parity." },
+    { action: 'watch.note', text: '' },
+  ], containers);
+  assert.deepEqual(v.map((s) => [s.action, s.target, s.days ?? s.text]), [
+    ['watch.mute', 'disk:*:full', 30],
+    ['watch.note', 'note', "Don't mention parity."],
+  ]);
+  assert.equal(buttonLabel(v[0]), '🔕 Mute disk:*:full (30 days)');
+  assert.match(describeOffer(v[0]), /`disk:\*:full` for 30 days/);
+  assert.match(describeOffer(v[1]), /"Don't mention parity\."/);
+  assert.equal(describeOffer({ action: 'container.restart', target: 'plex' }), '');
+});
+
+test('local actions run the watcher handler, not docker, and are audited', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'watch-'));
+  const calls = [];
+  const b = new ActionBook({
+    run: async (...a) => { calls.push(a); return { code: 0, stdout: '', stderr: '' }; },
+    auditPath: join(dir, 'audit.jsonl'),
+    local: { 'watch.mute': async (o) => `muted ${o.target}`, 'watch.note': async () => { throw new Error('too many notes'); } },
+  });
+  const r = await b.approve(b.offer({ action: 'watch.mute', target: 'disk:*:full', days: 7 }), 'o');
+  assert.deepEqual(r, { ok: true, message: 'muted disk:*:full' });
+  const n = await b.approve(b.offer({ action: 'watch.note', target: 'note', text: 't' }), 'o');
+  assert.equal(n.ok, false);
+  assert.match(n.message, /too many notes/);
+  assert.deepEqual(calls, []);
+  const audit = (await readFile(join(dir, 'audit.jsonl'), 'utf8')).trim().split('\n').map((l) => JSON.parse(l));
+  assert.deepEqual(audit.map((a) => a.result), ['ok', 'failed (too many notes)']);
 });
 
 test('at most three suggestions', () => {

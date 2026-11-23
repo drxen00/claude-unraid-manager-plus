@@ -54,7 +54,20 @@ test('prompts carry the rules and the data', () => {
     assert.match(p, /untrusted data/);
     assert.match(p, /Never\s+suggest them for claude-unraid-manager/);
     assert.match(p, /plex crashed/);
+    assert.match(p, /watch\.mute/);
+    assert.doesNotMatch(p, /standing notes/);
   }
+  const ctx = {
+    notes: [{ text: "Don't mention parity" }],
+    muted: [{ match: 'disk:*:full' }],
+    history: [{ who: 'bot', text: 'disk1 is 98% full' }, { who: 'owner', text: 'snooze that' }],
+  };
+  for (const p of [morningPrompt(inc, ctx), incidentPrompt(inc, inc, ctx), chatPrompt('snooze that', inc, ctx)]) {
+    assert.match(p, /standing notes[^]*- Don't mention parity/);
+    assert.match(p, /Muted by the owner[^]*disk:\*:full/);
+    assert.match(p, /\[bot\] disk1 is 98% full\n\[owner\] snooze that/);
+  }
+  assert.match(chatPrompt('x', inc), /"id":"k"/);
 });
 
 test('askClaude: runs claude -p as Claude user with the prompt on stdin', async () => {
