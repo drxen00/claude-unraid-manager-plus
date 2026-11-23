@@ -10,30 +10,56 @@ The watcher sends you, in a Discord direct message:
   wrong, why, and what to do. One message per problem, and a ✅ when it clears.
 - **Buttons to fix it**, when starting, stopping or restarting a container
   would help. Nothing changes until you tap one.
+- **Rules you set by talking to it**: "don't tell me about X until Y",
+  "let me know when Z happens".
 
-You can also write to the bot: `report`, `status`, `check`, `help`, or any
-question ("why is plex slow?").
+You can also write to the bot: `report`, `status`, `check`, `rules`, `help`,
+or any question ("why is plex slow?").
 
-## Quieting it down
+## Telling it what you want to hear about
 
-Tell it what you don't want to hear about, in your own words ("snooze that",
-"stop telling me about disk space", "don't mention parity, I know"). Claude
-answers with a green button that says exactly what will change; tap it. Or
-type it yourself:
+Talk to it like a person. It turns what you say into a rule, applies it right
+away, shows you exactly what it set, and gives you an **Undo** button.
+
+| You say | Rule it sets |
+|---|---|
+| "Don't tell me about disk space until a disk hits 99%" | 🔕 mute `disk:*:full` until any disk or pool is 99% full or more |
+| "Snooze that till Friday" (after an alert) | 🔕 mute that problem until Friday morning |
+| "Don't mention parity, I know there isn't any" | 📝 note that every report follows |
+| "Let me know when plex is back up" | 🔔 alert once when `plex` is running |
+| "Tell me every time plex crashes this week" | 🔔 alert on every new plex problem, ending in 7 days |
+| "Let me know when the parity check finishes" | 🔔 alert when Unraid sends a notification matching `*parity*` |
+| "Remind me tomorrow at 9 to check the backup" | 🔔 alert at that time |
+| "Never mind about plex" | 🗑️ removes that rule |
+
+What it can watch for (the watcher checks these itself every 15 minutes, no
+AI): how full a disk or pool is, a container's state (running, stopped,
+restarting, unhealthy, healthy, gone), a problem coming up or clearing, a new
+Unraid notification (any level) with given words, the array started or
+stopped, a parity sync or check running or done, and a time. If you ask for
+something outside that list, it says so instead of pretending.
+
+When a mute ends while the problem is still there, you hear about it once
+more. An alert for something that's already true ("tell me when plex is
+running" while it runs) waits for it to change and happen again. Problems
+with the array itself (array stopped, a disk disabled) can't be muted.
+
+Quick versions without Claude:
 
 | Command | What it does |
 |---|---|
-| `mute docker.img` | No more alerts for problems whose id or title contains it, until you unmute. |
-| `mute disk:*:full 30d` | The same with a pattern and a time limit (`forever` also works). |
-| `snooze plex` | Mute for 7 days, or `snooze plex 2d`. When it runs out and the problem is still there, you hear about it once more. |
-| `mutes`, `unmute 2`, `unmute all` | See or undo mutes. |
-| `note don't mention parity` | A standing instruction that goes into every report and answer. |
-| `notes`, `forget 1`, `forget all` | See or remove notes. |
+| `rules` | Every mute, alert and note, with its id (`m1`, `a2`, `n3`). |
+| `remove m1`, `remove all` | Remove rules. |
+| `mute docker.img`, `mute disk:*:full 30d`, `mute plex 12h` | Mute until removed, or for a while. |
+| `snooze plex`, `snooze plex 2d` | Mute for 7 days, or as long as you say. |
+| `note don't mention parity` | A standing instruction for every report. |
 
 Muted problems are still checked, just not announced; `status` says how many
-are muted. Mutes and notes live in the container's own state, not in Claude's
-reach, and change only by your command or your tap. The bot remembers the
-last few messages, so "that" means the message you're replying to.
+are muted. Rules live in the container's own state (`/var/lib/unraid-watch`,
+root only), out of Claude's reach. They change only from your own messages
+or your taps: a rule Claude suggests in a report or an alert, rather than in
+reply to you, is only a button. The bot remembers the last 12 messages, so
+"that" means the message you're replying to.
 
 ## What it can and cannot do
 
@@ -41,7 +67,7 @@ last few messages, so "that" means the message you're replying to.
 |---|---|
 | Checks every 15 minutes | Plain scripts, no AI, no cost. |
 | Explanations and the morning report | Claude, read-only. It runs with nobody at the keyboard, so anything that would need your approval is refused automatically. Uses your Claude subscription. |
-| Buttons | Start, stop or restart **one container**, or mute a problem / keep a note (the watcher's own settings). Nothing else exists. Each button works once, for 15 minutes, at most 5 fixes an hour, and only for your Discord account. The container's state is checked again right before it runs. Every click is logged in the container log (`unraid-watch audit:`). |
+| Buttons | Start, stop or restart **one container**, or change your rules (mute, alert, note). Nothing else exists. Each button works once, for 15 minutes, at most 5 fixes an hour, and only for your Discord account. The container's state is checked again right before it runs. Every click is logged in the container log (`unraid-watch audit:`). |
 | Never | Disks, array, parity, shares, the USB stick, Unraid settings, deleting anything. For those Claude tells you where to click in the Unraid web UI. The watcher can't touch Claude's own two containers either. |
 
 ## Setup (about 10 minutes)

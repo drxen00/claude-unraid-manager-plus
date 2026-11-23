@@ -1,35 +1,38 @@
 // unraid-watch: checks the server every few minutes without AI, asks Claude
 // (read-only) to explain new problems and to write a morning report, and
 // sends both to the owner's Discord DM, with buttons for the few fixes it is
-// allowed to make. Started by the container's entrypoint as root, so Claude's
-// user cannot read its Discord token; Claude itself runs as that user.
+// allowed to make. The owner can also set rules in plain words ("don't tell
+// me about X until Y", "let me know when Z"): Claude turns them into a rule,
+// the watcher validates and checks it (rules.mjs). Started by the
+// container's entrypoint as root, so Claude's user cannot read its Discord
+// token or its state; Claude itself runs as that user.
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { ActionBook, describeOffer, validateSuggestions } from './actions.mjs';
+import { ActionBook, CATALOG, describeOffer, validateSuggestions } from './actions.mjs';
 import { askClaude, chatPrompt, incidentPrompt, morningPrompt } from './claude.mjs';
 import { collect } from './checks.mjs';
 import { loadConfig } from './config.mjs';
 import { startDiscord } from './discord.mjs';
 import { diff, emptyState, failureFindings, openIncidents } from './incidents.mjs';
 import {
-  addMute, addNote, describeMute, emptyPrefs, expireMutes, matches, mutedBy,
-  normalizePrefs, parseMuteArgs, partition, removeEntry,
-} from './prefs.mjs';
+  addAlert, addMute, addNote, describeCondition, describeRule, emptyPrefs, listRules, matches,
+  mutedBy, normalizePrefs, parseMuteArgs, partition, removeRules, restoreRules, step, validIds,
+} from './rules.mjs';
 import { asClaude, run } from './run.mjs';
 import { msUntil } from './schedule.mjs';
 
 const HELP = [
-  '**Commands** (just type them here):',
+  'Talk to me normally, e.g. "why is plex slow?", "don\'t tell me about disk space until a disk hits 99%", "let me know when the parity check finishes", "snooze that till Friday". Rules apply right away and come with an Undo button.',
+  '',
+  '**Commands:**',
   '• `report`: the full server report now',
   '• `status`: problems I currently know about',
   '• `check`: run the checks now',
-  '• `mute <word or id> [7d|forever]`: no more alerts about it (default: until you unmute)',
-  '• `snooze <word or id> [days]`: the same, for 7 days unless you say otherwise',
-  '• `mutes`, `unmute <number|all>`: see or undo mutes',
-  '• `note <text>`: a standing instruction for every report, e.g. `note don\'t mention parity`',
-  '• `notes`, `forget <number|all>`: see or remove notes',
+  '• `rules`: your mutes, alerts and notes, with their ids',
+  '• `remove <id>` (e.g. `remove m1`) or `remove all`',
+  '• `mute <word> [7d|12h|forever]`, `snooze <word> [days]`, `note <text>`: quick versions without Claude',
   '• `help`: this list',
-  'Anything else goes to Claude, e.g. "why is plex slow?" or "snooze that". Claude can only look; changes come as buttons you tap.',
+  'Claude can only look; container fixes come as buttons you tap.',
 ].join('\n');
 
 const ICON = { critical: '🔴', warning: '⚠️' };
@@ -69,30 +72,61 @@ async function main() {
   const saveState = () => writeJson(statePath, state);
   const savePrefs = () => writeJson(prefsPath, prefs);
 
-  async function muteNow(match, days) {
-    const r = addMute(prefs, { match, days });
-    prefs = r.prefs;
-    await savePrefs();
-    const n = openIncidents(state).filter((i) => matches(r.mute, i)).length;
-    return `🔕 Muted ${describeMute(r.mute)}.${n ? ` That covers ${n} open problem${n === 1 ? '' : 's'}.` : ''} Type \`mutes\` to see or undo.`;
-  }
+  // The latest raw facts from the checks, for new alerts' starting point.
+  let facts = null;
+  let containers = [];
 
-  async function noteNow(text) {
-    const r = addNote(prefs, text);
-    prefs = r.prefs;
+  // Apply one validated rule change. Returns { message, created, removed }.
+  async function applyRule(s) {
+    let message;
+    let created = [];
+    let removed = [];
+    if (s.action === 'watch.mute') {
+      const r = addMute(prefs, s.spec);
+      prefs = r.prefs;
+      created = [r.rule.id];
+      const n = openIncidents(state).filter((i) => matches(r.rule, i)).length;
+      message = `${describeRule(r.rule)}.${n ? ` That covers ${n} open problem${n === 1 ? '' : 's'}.` : ''}`;
+    } else if (s.action === 'watch.alert') {
+      const r = addAlert(prefs, s.spec, facts && { ...facts, open: openIncidents(state) });
+      prefs = r.prefs;
+      created = [r.rule.id];
+      const already = r.rule.last === true && r.rule.when.type !== 'notification';
+      message = `${describeRule(r.rule)}.${already ? ' That is already the case right now, so I will tell you the next time it happens.' : ''}`;
+    } else if (s.action === 'watch.note') {
+      const r = addNote(prefs, s.spec.text);
+      prefs = r.prefs;
+      created = [r.rule.id];
+      message = `${describeRule(r.rule)}.`;
+    } else if (s.action === 'watch.remove') {
+      const r = removeRules(prefs, s.spec.ids);
+      prefs = r.prefs;
+      removed = r.removed;
+      message = `🗑️ Removed: ${r.removed.map((x) => `\`${x.id}\``).join(', ')}.`;
+    } else if (s.action === 'watch.undo') {
+      if (s.spec.remove.length) {
+        try {
+          prefs = removeRules(prefs, s.spec.remove).prefs;
+        } catch {
+          // Already removed by hand: fine.
+        }
+      }
+      prefs = restoreRules(prefs, s.spec.add);
+      message = '↩️ Undone.';
+    } else {
+      throw new Error('unknown rule action');
+    }
     await savePrefs();
-    return `📝 Noted for every report: "${r.note.text}". Type \`notes\` to see or remove.`;
+    return { message, created, removed };
   }
 
   const book = new ActionBook({
     run,
     auditPath: join(cfg.stateDir, 'audit.jsonl'),
-    local: {
-      'watch.mute': (o) => muteNow(o.target, o.days),
-      'watch.note': (o) => noteNow(o.text),
-    },
+    local: Object.fromEntries(
+      ['watch.mute', 'watch.alert', 'watch.note', 'watch.remove', 'watch.undo'].map((a) => [a, async (o) => (await applyRule(o)).message]),
+    ),
   });
-  let containers = [];
 
   // One Claude run at a time; later requests wait their turn.
   let queue = Promise.resolve();
@@ -116,15 +150,38 @@ async function main() {
     await bot.send(text, offers);
   }
 
-  function ctx() {
-    return { notes: prefs.notes, muted: prefs.mutes, history: [...history] };
-  }
+  const ctx = () => ({ prefs, history: [...history] });
 
-  async function sendWithOffers(text, suggestions) {
+  // Send Claude's reply. apply: rule changes were asked for in the owner's
+  // own chat message, so they take effect now, with an Undo button; in
+  // reports and alerts they are only offered as buttons.
+  async function respond(text, suggestions, { apply = false } = {}) {
     const valid = validateSuggestions(suggestions, containers);
-    const offers = valid.map((s) => ({ ...s, id: book.offer(s) }));
-    const exact = offers.map(describeOffer).filter(Boolean);
-    await say(exact.length ? `${text}\n\n${exact.join('\n')}` : text, offers);
+    const done = [];
+    const offers = [];
+    const undo = { add: [], remove: [] };
+    for (const s of valid) {
+      if (apply && CATALOG[s.action].local) {
+        try {
+          const r = await applyRule(s);
+          done.push(`✅ ${r.message}`);
+          undo.remove.push(...r.created);
+          undo.add.push(...r.removed);
+          await book.audit({ who: 'owner (chat)', action: s.action, target: s.target, spec: s.spec, result: 'ok' });
+        } catch (err) {
+          done.push(`⚠️ ${err.message}`);
+        }
+      } else {
+        offers.push({ ...s, id: book.offer(s) });
+      }
+    }
+    if (undo.add.length || undo.remove.length) {
+      const u = { action: 'watch.undo', target: 'undo', spec: undo };
+      offers.push({ ...u, id: book.offer(u) });
+    }
+    const exact = offers.map(describeOffer).filter(Boolean).map((d) => `Tap to: ${d}`);
+    const tail = [...done, ...exact];
+    await say(tail.length ? `${text}\n\n${tail.join('\n')}` : text, offers);
   }
 
   async function ask(prompt) {
@@ -137,9 +194,7 @@ async function main() {
     }
   }
 
-  function shownIncidents() {
-    return partition(prefs, openIncidents(state)).shown;
-  }
+  const shownIncidents = () => partition(prefs, openIncidents(state)).shown;
 
   function plainList(incidents) {
     if (!incidents.length) return '✅ No open problems.';
@@ -148,7 +203,7 @@ async function main() {
 
   function statusText() {
     const { shown, muted } = partition(prefs, openIncidents(state));
-    const tail = muted.length ? `\n_${muted.length} muted problem${muted.length === 1 ? '' : 's'} not shown: type \`mutes\`._` : '';
+    const tail = muted.length ? `\n_${muted.length} muted problem${muted.length === 1 ? '' : 's'} not shown: type \`rules\`._` : '';
     return plainList(shown) + tail;
   }
 
@@ -157,11 +212,6 @@ async function main() {
     if (checking) return { raised: [], resolved: [] };
     checking = true;
     try {
-      const exp = expireMutes(prefs);
-      if (exp.expired.length) {
-        prefs = exp.prefs;
-        await savePrefs();
-      }
       const res = await collect(cfg, { run, asClaude });
       containers = res.containers.length ? res.containers : containers;
       const findings = [...res.findings, ...failureFindings(res.failed)];
@@ -169,13 +219,30 @@ async function main() {
       state = d.state;
       await saveState();
 
+      facts = res.facts;
+      const st = step(prefs, { ...facts, open: openIncidents(state) });
+      prefs = st.prefs;
+      if (st.lifted.length || st.fired.length || st.expired.length) await savePrefs();
+
       const raised = d.raised.filter((i) => !mutedBy(prefs, i));
-      // A snooze that ran out: its problems, if still there, come back once.
+      // A mute that ended: its problems, if still there, come back once.
       for (const i of openIncidents(state)) {
         if (raised.some((r) => r.key === i.key) || mutedBy(prefs, i)) continue;
-        if (exp.expired.some((m) => matches(m, i))) raised.push(i);
+        if (st.lifted.some((l) => matches(l.rule, i))) raised.push(i);
       }
       const resolved = d.resolved.filter((i) => !mutedBy(prefs, i));
+
+      // The owner's own alerts always go out, also during a report.
+      for (const { rule, detail } of st.fired) {
+        const more = rule.repeat ? ` I'll keep telling you; \`remove ${rule.id}\` to stop.` : '';
+        await say(`🔔 **${rule.say}**${detail ? `\n${detail}` : ''}\n_You asked me to tell you when ${describeCondition(rule.when)}.${more}_`);
+      }
+      for (const { rule, detail } of st.lifted) {
+        await say(`🔔 Back to telling you about \`${rule.match}\`: ${detail}.`);
+      }
+      for (const rule of st.expired) {
+        await say(`⌛ Stopped watching for: "${rule.say}" (the time you set ran out).`);
+      }
 
       if (!quiet) {
         if (resolved.length) {
@@ -186,7 +253,7 @@ async function main() {
             const r = await ask(incidentPrompt(raised, shownIncidents(), ctx()));
             if (r.ok) {
               const head = raised.some((i) => i.severity === 'critical') ? '🔴 **New problem**' : '⚠️ **New problem**';
-              await sendWithOffers(`${head}\n${r.text}`, r.actions);
+              await respond(`${head}\n${r.text}`, r.actions);
             } else {
               await say(`${plainList(raised)}\n\n_(Claude could not look into this: ${r.error})_`);
             }
@@ -203,31 +270,13 @@ async function main() {
     await check({ quiet: true });
     await withClaude(async () => {
       const r = await ask(morningPrompt(shownIncidents(), ctx()));
-      if (r.ok) await sendWithOffers(`☀️ **Server report**\n${r.text}`, r.actions);
+      if (r.ok) await respond(`☀️ **Server report**\n${r.text}`, r.actions);
       else await say(`☀️ **Server report** (without Claude: ${r.error})\n${statusText()}`);
     });
   }
 
-  function listMutes() {
-    if (!prefs.mutes.length) return 'Nothing is muted.';
-    return `**Muted:**\n${prefs.mutes.map((m, i) => `${i + 1}. ${describeMute(m)}`).join('\n')}\nUndo with \`unmute <number>\` or \`unmute all\`.`;
-  }
-
-  function listNotes() {
-    if (!prefs.notes.length) return 'No notes. Add one with `note <text>`.';
-    return `**Notes for every report:**\n${prefs.notes.map((n, i) => `${i + 1}. ${n.text}`).join('\n')}\nRemove with \`forget <number>\` or \`forget all\`.`;
-  }
-
-  async function remove(kind, which) {
-    const r = removeEntry(prefs, kind, which);
-    prefs = r.prefs;
-    await savePrefs();
-    const what = kind === 'mutes' ? 'Unmuted' : 'Forgot';
-    const items = r.removed.map((x) => (kind === 'mutes' ? `\`${x.match}\`` : `"${x.text}"`));
-    return items.length ? `${what}: ${items.join(', ')}.` : 'Nothing to remove.';
-  }
-
-  // Typed commands; returns the reply, or null when the text is for Claude.
+  // Typed commands; returns the reply, '' when already answered, or null
+  // when the text is for Claude.
   async function command(text) {
     const [first, ...restWords] = text.split(/\s+/);
     const word = first.toLowerCase();
@@ -235,8 +284,7 @@ async function main() {
     if (!rest) {
       if (word === 'help' || word === '?') return HELP;
       if (word === 'status') return statusText();
-      if (word === 'mutes' || word === 'muted') return listMutes();
-      if (word === 'notes') return listNotes();
+      if (['rules', 'mutes', 'muted', 'notes', 'alerts'].includes(word)) return listRules(prefs);
       if (word === 'report') {
         await report();
         return '';
@@ -246,14 +294,18 @@ async function main() {
         return d.raised.length || d.resolved.length ? '' : `Checked. Nothing new.\n${statusText()}`;
       }
     }
-    if (word === 'mute' || word === 'snooze') {
-      const { match, days } = parseMuteArgs(rest, word === 'snooze' ? 7 : null);
-      if (VAGUE.has(match.replace(/\*/g, '').toLowerCase())) return null;
-      return muteNow(match, days);
+    if (['remove', 'unmute', 'forget', 'cancel', 'delete'].includes(word) && rest) {
+      const ids = validIds(rest);
+      if (!ids) return null; // "forget about plex": let Claude work out which rule
+      const r = await applyRule({ action: 'watch.remove', spec: { ids } });
+      return r.message;
     }
-    if (word === 'unmute' && rest) return remove('mutes', rest);
-    if (word === 'forget' && rest) return remove('notes', rest);
-    if (word === 'note' && rest) return noteNow(rest);
+    if (word === 'mute' || word === 'snooze') {
+      const spec = parseMuteArgs(rest, word === 'snooze' ? 7 : null);
+      if (VAGUE.has(spec.match.replace(/\*/g, '').toLowerCase())) return null;
+      return `✅ ${(await applyRule({ action: 'watch.mute', spec })).message}`;
+    }
+    if (word === 'note' && rest) return `✅ ${(await applyRule({ action: 'watch.note', spec: { text: rest } })).message}`;
     return null;
   }
 
@@ -271,7 +323,7 @@ async function main() {
     if (reply !== null) return say(reply);
     return withClaude(async () => {
       const r = await ask(chatPrompt(text, shownIncidents(), ctx()));
-      if (r.ok) await sendWithOffers(r.text, r.actions);
+      if (r.ok) await respond(r.text, r.actions, { apply: true });
       else await say(`Claude could not answer: ${r.error}`);
     });
   }

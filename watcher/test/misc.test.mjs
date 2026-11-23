@@ -55,16 +55,22 @@ test('prompts carry the rules and the data', () => {
     assert.match(p, /Never\s+suggest them for claude-unraid-manager/);
     assert.match(p, /plex crashed/);
     assert.match(p, /watch\.mute/);
+    assert.match(p, /"type": "notification"/);
+    assert.match(p, /Now: .*UTC[+-]\d\d:\d\d/);
     assert.doesNotMatch(p, /standing notes/);
   }
   const ctx = {
-    notes: [{ text: "Don't mention parity" }],
-    muted: [{ match: 'disk:*:full' }],
+    prefs: {
+      mutes: [{ id: 'm1', match: 'disk:*:full', until: null, untilWhen: { type: 'disk', disk: '*', op: '>=', percent: 99 } }],
+      alerts: [{ id: 'a2', when: { type: 'container', name: 'plex', state: 'running' }, say: 'plex is back', repeat: false }],
+      notes: [{ id: 'n3', text: "Don't mention parity" }],
+    },
     history: [{ who: 'bot', text: 'disk1 is 98% full' }, { who: 'owner', text: 'snooze that' }],
   };
   for (const p of [morningPrompt(inc, ctx), incidentPrompt(inc, inc, ctx), chatPrompt('snooze that', inc, ctx)]) {
     assert.match(p, /standing notes[^]*- Don't mention parity/);
-    assert.match(p, /Muted by the owner[^]*disk:\*:full/);
+    assert.match(p, /Current rules[^]*`m1` 🔕 Not telling you about `disk:\*:full` until any disk or pool is 99% full or more/);
+    assert.match(p, /`a2` 🔔 Telling you once when `plex` is running: "plex is back"/);
     assert.match(p, /\[bot\] disk1 is 98% full\n\[owner\] snooze that/);
   }
   assert.match(chatPrompt('x', inc), /"id":"k"/);
