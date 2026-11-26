@@ -66,6 +66,7 @@ to investigate and, ideally after you confirm, to fix things.
 - **Guard hook** — a short list of catastrophic commands (`mkfs`, `wipefs`, writing to a disk, `zpool destroy`, `rm -rf` on a mount root) is blocked by a text match on the whole command, whichever wrapper is used (`host`, `sh -c`, absolute paths); a second list (downloads piped to a shell, network tools, deletes, flash-drive writes) always asks you first, with a reason, in any permission mode. A safety net, not a wall; see [Defense in Depth](#defense-in-depth) and [Prompt injection](#prompt-injection)
 - **Remote Control** — reach your Claude session from phone or tablet via the Claude app
 - **Discord watcher** (optional) — a morning report and alerts in your Discord DMs, explained by Claude in plain English; Claude can fix things (restart, update, permission fixes) after you tap Allow for each change; rules you set by talking to it ("don't tell me about X until Y", "let me know when Z"). See [docs/discord.md](docs/discord.md)
+- **Wraith server panel** (optional): your containers, load, disks and alerts in a [Wraith](https://wrraith.com) space, with start, stop and restart buttons. The server dials out, so nothing is opened up. See [docs/wraith.md](docs/wraith.md)
 - **Persistent sessions** — tmux keeps the session alive across disconnects; Claude is restarted if it exits; `--continue` resumes the last conversation
 - **GUI-aware** — Claude is instructed to create dockerMan templates for new containers, respect Unraid's persistence model, and keep changes manageable through the web UI. Instructions, not guarantees
 - **Multi-filesystem** — detects ZFS pools, btrfs pools, XFS, and the classic Unraid parity array; only ZFS pool-only setups have been verified so far
@@ -479,6 +480,7 @@ The `## Custom` section at the bottom of the generated `CLAUDE.md` is yours. Add
 | `HOST_HELPER_IMAGE` | `alpine:3.21` | Image for the helper container behind `host`. Pulled on start |
 | `DISCORD_BOT_TOKEN` | *(empty)* | Turns on the Discord watcher ([docs/discord.md](docs/discord.md)) |
 | `DISCORD_USER_ID` | *(empty)* | Your numeric Discord user ID; the only account the bot talks to |
+| `WRAITH_PANEL_CODE` | *(empty)* | Shows this server in a Wraith space (#system, #alerts); the code from Wraith, Space settings, Server panel ([docs/wraith.md](docs/wraith.md)) |
 | `REPORT_TIME` | `08:00` | Morning report, HH:MM in `TZ`; `off` disables it |
 | `CHECK_INTERVAL` | `15` | Minutes between checks (5 to 240) |
 | `DISK_WARN_PERCENT` | `90` | Warn when a disk or pool is this full; 98% and more is critical |

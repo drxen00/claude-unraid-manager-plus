@@ -5,12 +5,15 @@
   "description": "Watches the Unraid server, reports to Discord, asks before fixing.",
   "type": "module",
   "main": "src/main.mjs",
-  "engines": { "node": ">=22" },
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "start": "node src/main.mjs",
     "test": "node --test"
   },
   "dependencies": {
-    "discord.js": "14.28.1"
+    "discord.js": "14.28.1",
+    "socket.io-client": "4.8.3"
   }
 }
