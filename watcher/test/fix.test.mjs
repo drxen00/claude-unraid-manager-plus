@@ -28,7 +28,7 @@ test('an allowed restart asks the owner with the exact change, then runs the fix
   const { b, calls } = await broker();
   const r = await b.handle({ tool: 'container_restart', args: { name: 'sonarr', reason: 'It is stuck since 3 AM.' } });
   assert.deepEqual(r, { ok: true, text: 'Restarted sonarr.' });
-  assert.deepEqual(calls.asked, [{ tool: 'container_restart', what: 'restart **sonarr**', reason: 'It is stuck since 3 AM.', source: 'Fix it' }]);
+  assert.deepEqual(calls.asked, [{ tool: 'container_restart', what: 'restart **sonarr**', detail: '', reason: 'It is stuck since 3 AM.', source: 'Fix it' }]);
   assert.deepEqual(calls.run, ['docker restart sonarr']);
   assert.equal(calls.audit[0].result, 'ok');
   assert.match(calls.notes[0], /restart sonarr: done/);

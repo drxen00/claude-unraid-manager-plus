@@ -20,8 +20,11 @@ wanted to do and why, and let them do it from the Unraid GUI.
 
 When the Discord watcher is set up, a few more changes are possible through
 the fix tools (`mcp__fix__…`): starting, stopping, restarting and updating a
-container (pull the newest image, re-create it from its Unraid template), and
-fixing the owner of a folder below a container's appdata folder. Every call
+container (pull the newest image, re-create it from its Unraid template),
+fixing the owner of a folder below a container's appdata folder, running one
+shell command inside a running container (`container_exec`, its output comes
+back), and replacing one exact piece of text in a config file below a
+container's appdata folder (`appdata_edit`, a backup is kept). Every call
 is shown to the user in Discord with Allow and Deny and waits for their tap,
 so give a clear one-sentence reason and change one thing at a time. If the
 tools are not listed, they are not set up; if a call says host-fix is not set

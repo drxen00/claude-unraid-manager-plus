@@ -748,6 +748,9 @@ printf '<?xml version="1.0"?>\n<Container>\n  <Name>sonarr</Name>\n</Container>\
 printf 'DOCKER_APP_CONFIG_PATH="/mnt/user/appdata/"\n' > "$HF/boot/config/docker.cfg"
 : > "$HF/mnt/user/appdata/renamed-tool/workspace/.unraid-watch/.claude-unraid-watch"
 ln -s "$HF/etc" "$HF/mnt/user/appdata/evil"
+printf 'port=8989\nlog=info\n' > "$HF/mnt/user/appdata/sonarr/config/config.ini"
+printf 'x\n' > "$HF/mnt/user/media/x/movie.nfo"
+printf 'secret\n' > "$HF/mnt/user/appdata/claude-unraid-manager/workspace/f"
 ln -s "$HF/etc" "$HF/mnt/user/appdata/sonarr/escape"
 hf() { env -u SSH_ORIGINAL_COMMAND HOST_FIX_TEST_ROOT="$HF" bash "$ROOT/host-fix" --print "$@"; }
 expect_hf() {
@@ -789,6 +792,62 @@ refused_hf chown 99:100 /mnt/disk1
 refused_hf rm -rf /
 refused_hf mdcmd stop
 refused_hf sh -c id
+# exec: the command comes on stdin and is passed on as one argument.
+out=$(printf 'grep -i error /config/logs/x.txt; echo "$HOME"' | env -u SSH_ORIGINAL_COMMAND HOST_FIX_TEST_ROOT="$HF" bash "$ROOT/host-fix" --print exec sonarr 2>&1)
+want=$(printf 'docker exec sonarr sh -c %q' 'grep -i error /config/logs/x.txt; echo "$HOME"')
+if [ "$out" = "$want" ]; then pass "host-fix: exec passes the command as one argument"; else fail "host-fix exec: '$out' (want '$want')"; fi
+refused_hf_in() {
+  local input=$1 out st
+  shift
+  set +e
+  out=$(printf '%s' "$input" | env -u SSH_ORIGINAL_COMMAND HOST_FIX_TEST_ROOT="$HF" bash "$ROOT/host-fix" --print "$@" 2>&1)
+  st=$?
+  set -e
+  if [ "$st" -eq 65 ]; then pass "host-fix refused: $*"; else fail "host-fix not refused ($st): $* -> $out"; fi
+}
+refused_hf_in 'id' exec claude-unraid-manager
+refused_hf_in 'id' exec claude-docker-proxy
+refused_hf_in 'id' exec 'sonarr;id'
+refused_hf_in '' exec sonarr
+refused_hf_in "$(head -c 8193 /dev/zero | tr '\0' a)" exec sonarr
+refused_hf_in 'id' exec sonarr radarr
+# read and write: files below appdata/<app> only.
+expect_hf 'cat /mnt/user/appdata/sonarr/config/config.ini' read /mnt/user/appdata/sonarr/config/config.ini
+refused_hf read /mnt/user/appdata/sonarr
+refused_hf read /mnt/user/appdata/sonarr/config
+refused_hf read /mnt/user/media/x/movie.nfo
+refused_hf read /mnt/user/appdata/sonarr/escape/passwd
+refused_hf read /mnt/user/appdata/claude-unraid-manager/workspace/f
+refused_hf read /mnt/user/appdata/sonarr/../claude-unraid-manager/workspace/f
+refused_hf read /mnt/user/appdata/sonarr/nope.ini
+refused_hf read /boot/config/go
+sha=$(sha256sum "$HF/mnt/user/appdata/sonarr/config/config.ini" | cut -c1-64)
+expect_hf 'write /mnt/user/appdata/sonarr/config/config.ini' write /mnt/user/appdata/sonarr/config/config.ini "$sha"
+refused_hf write /mnt/user/appdata/sonarr/config/config.ini "$(printf '0%.0s' $(seq 64))"
+refused_hf write /mnt/user/appdata/sonarr/config/config.ini
+refused_hf write /mnt/user/media/x/movie.nfo "$sha"
+refused_hf write /mnt/user/appdata/claude-unraid-manager/workspace/f "$sha"
+# A real read and write in the fixture: new content in place, the old one kept.
+cfg="$HF/mnt/user/appdata/sonarr/config/config.ini"
+chmod 0640 "$cfg"
+out=$(env -u SSH_ORIGINAL_COMMAND HOST_FIX_TEST_ROOT="$HF" bash "$ROOT/host-fix" read /mnt/user/appdata/sonarr/config/config.ini)
+if [ "$out" = "$(printf 'port=8989\nlog=info')" ]; then pass "host-fix: read prints the file"; else fail "host-fix read: '$out'"; fi
+if printf 'port=8989\nlog=debug\n' | env -u SSH_ORIGINAL_COMMAND HOST_FIX_TEST_ROOT="$HF" bash "$ROOT/host-fix" write /mnt/user/appdata/sonarr/config/config.ini "$sha" >/dev/null 2>&1; then
+  pass "host-fix: write runs"
+else
+  fail "host-fix: write failed"
+fi
+if [ "$(cat "$cfg")" = "$(printf 'port=8989\nlog=debug')" ]; then pass "host-fix: write replaced the content"; else fail "host-fix write content: $(cat "$cfg")"; fi
+if [ "$(stat -c %a "$cfg")" = 640 ]; then pass "host-fix: write keeps the mode"; else fail "host-fix write mode: $(stat -c %a "$cfg")"; fi
+bak=$(find "$HF/mnt/user/appdata/sonarr/config" -name 'config.ini.claude-bak-*' | head -1)
+if [ -n "$bak" ] && [ "$(cat "$bak")" = "$(printf 'port=8989\nlog=info')" ]; then pass "host-fix: write keeps a backup"; else fail "host-fix write backup: '$bak'"; fi
+if [ -z "$(find "$HF/mnt/user/appdata/sonarr/config" -name '*.claude-tmp.*')" ]; then pass "host-fix: no temp file left"; else fail "host-fix: temp file left"; fi
+# The same sha again: the file changed since, so it is refused.
+set +e
+printf 'x\n' | env -u SSH_ORIGINAL_COMMAND HOST_FIX_TEST_ROOT="$HF" bash "$ROOT/host-fix" write /mnt/user/appdata/sonarr/config/config.ini "$sha" >/dev/null 2>&1
+st=$?
+set -e
+if [ "$st" -eq 65 ] && [ "$(cat "$cfg")" = "$(printf 'port=8989\nlog=debug')" ]; then pass "host-fix: a stale write is refused"; else fail "host-fix stale write ($st)"; fi
 # Under sshd the request comes from SSH_ORIGINAL_COMMAND and the test root is
 # ignored: this runner has no Unraid templates, so the update is refused.
 set +e
@@ -797,7 +856,7 @@ st=$?
 set -e
 if [ "$st" -eq 65 ] && printf '%s' "$out" | grep -q 'no Unraid template'; then pass "host-fix: test root ignored under ssh"; else fail "host-fix under ssh ($st): $out"; fi
 out=$(SSH_ORIGINAL_COMMAND='version' bash "$ROOT/host-fix" rm -rf /)
-if [ "$out" = 1 ]; then pass "host-fix: arguments ignored under ssh"; else fail "host-fix arguments under ssh: '$out'"; fi
+if [ "$out" = 2 ]; then pass "host-fix: arguments ignored under ssh"; else fail "host-fix arguments under ssh: '$out'"; fi
 # A real chown in the fixture (as this user, to its own uid): it changes the
 # folder and does not follow the link inside it.
 me="$(id -u):$(id -g)"

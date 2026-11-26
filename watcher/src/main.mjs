@@ -14,7 +14,7 @@ import { askClaude, chatPrompt, fixPrompt, incidentPrompt, morningPrompt } from 
 import { collect, parseDockerPs } from './checks.mjs';
 import { loadConfig } from './config.mjs';
 import { approvalRow, startDiscord } from './discord.mjs';
-import { APPROVAL_MS, FixBroker, serveFixSocket } from './fix.mjs';
+import { APPROVAL_MS, FixBroker, HOST_FIX_FILES, serveFixSocket } from './fix.mjs';
 import { diff, emptyState, failureFindings, openIncidents } from './incidents.mjs';
 import {
   addAlert, addMute, addNote, describeCondition, describeRule, emptyPrefs, listRules, matches,
@@ -407,12 +407,13 @@ async function main() {
 
   // One Allow/Deny question per change Claude asks for (fix.mjs).
   const approvals = new Map();
-  async function askOwner({ what, reason, source }) {
+  async function askOwner({ what, detail, reason, source }) {
     // Allow / Deny lives in Discord for now; without it nobody can say yes.
     if (!discordUp) return 'deny';
     const id = randomBytes(9).toString('base64url');
     const from = source ? ` (${source})` : '';
-    const text = `🛠️ **Claude wants to ${what}**${from}${reason ? `\nWhy: ${reason}` : ''}\n_Nothing happens unless you tap Allow (within 15 minutes)._`;
+    // detail: the exact command or the diff, and any warning, under the headline.
+    const text = `🛠️ **Claude wants to ${what}**${from}${detail ? `\n${detail}` : ''}${reason ? `\nWhy: ${reason}` : ''}\n_Nothing happens unless you tap Allow (within 15 minutes)._`;
     remember('bot', text);
     const msg = await bot.send(text, [], { rows: [approvalRow(id)] });
     return new Promise((resolve) => {
@@ -438,16 +439,20 @@ async function main() {
   // host-fix on the Unraid host, with the watcher's own key (made above).
   const hostFixReady = Boolean(cfg.sshHost) && (await exists(hostFixKey));
   const hostFix = hostFixReady
-    ? (args, timeoutMs) => run('ssh', [
+    // input: the command for exec, or a file's new content for write (stdin).
+    ? (args, timeoutMs, input) => run('ssh', [
       '-T', '-i', hostFixKey, '-p', String(cfg.sshPort),
       '-o', 'BatchMode=yes', '-o', 'IdentitiesOnly=yes', '-o', 'ConnectTimeout=5', '-o', 'LogLevel=ERROR',
       '-o', 'StrictHostKeyChecking=accept-new', '-o', `UserKnownHostsFile=${join(stateDir, 'known_hosts')}`,
       `root@${cfg.sshHost}`, '--', args.join(' '),
-    ], { timeoutMs })
+    ], { timeoutMs, input })
     : null;
   if (hostFix) {
     const v = await hostFix(['version'], 15_000);
-    if (v.code === 0) console.log(`unraid-watch: host fixes over SSH to ${cfg.sshHost} (host-fix ${v.stdout.trim()})`);
+    const ver = Number(v.stdout.trim());
+    if (v.code === 0 && ver < HOST_FIX_FILES) {
+      console.log(`unraid-watch: host fixes over SSH to ${cfg.sshHost} (host-fix ${ver}); commands in containers and config edits need the newer host-fix: docker exec -it claude-unraid-manager host-fix-setup, step 1`);
+    } else if (v.code === 0) console.log(`unraid-watch: host fixes over SSH to ${cfg.sshHost} (host-fix ${v.stdout.trim()})`);
     else console.log(`unraid-watch: host fixes not working yet (${(v.stderr || v.stdout).trim().slice(0, 200) || `exit ${v.code}`}); updates and permission fixes need host-fix-setup`);
   }
 

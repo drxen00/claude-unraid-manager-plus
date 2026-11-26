@@ -85,6 +85,8 @@ What Claude can do this way:
 | Start, stop or restart a container | Nothing extra |
 | Update a container (pull the newest image, re-create it from its template, exactly like **Update** on the Docker tab) | The host-fix setup below |
 | Fix the owner of a folder below a container's appdata folder (the usual cause of "permission denied") | The host-fix setup below |
+| Run a command inside a container, to check something or fix it. You see the exact command; if the container can write to folders outside appdata (a media share, an array disk), the question says so in bold, because the command could change files there. | The host-fix setup below (version 2) |
+| Change a config file below a container's appdata folder. You see the change as old and new lines; a backup copy (`<file>.claude-bak-<date>`) is kept next to it. | The host-fix setup below (version 2) |
 
 The same tools work from the Claude app (Remote Control): ask there, and the
 Allow / Deny question comes to Discord.
@@ -104,7 +106,7 @@ docker exec -it claude-unraid-manager host-fix-setup
 It prints the commands to copy the script to the USB stick, read it, and
 allow the key. "Unraid SSH host" must be set in the template (it already is
 if the read-only checks work). Restart the container; the log then says
-`unraid-watch: host fixes over SSH to … (host-fix 1)`.
+`unraid-watch: host fixes over SSH to … (host-fix 2)`. If it says host-fix 1, repeat step 1 of host-fix-setup (copy the script) to get commands in containers and config edits.
 
 ## What it can and cannot do
 
@@ -114,7 +116,7 @@ if the read-only checks work). Restart the container; the log then says
 | Explanations and the morning report | Claude, look only: reports and alerts never change anything. Uses your Claude subscription. |
 | Fixes | Only when you ask or tap Fix it, only through the fix tools above, and only after you tap **Allow** for that exact change. One question at a time, at most 10 changes and 30 questions an hour. Every request and answer is logged (`unraid-watch audit:`). |
 | Buttons | Start, stop or restart **one container**, change your rules (mute, alert, note), or Fix it. Each button works once, for 15 minutes, and only for your Discord account. The container's state is checked again right before it runs. |
-| Never | Disks, array, parity, shares, the USB stick, Unraid settings, editing config files, deleting anything. For those Claude tells you where to click in the Unraid web UI. Claude's own two containers and their data are off limits too. |
+| Never | Disks, array, parity, shares, the USB stick and Unraid settings directly, or deleting anything outside a container. For those Claude tells you where to click in the Unraid web UI. Claude's own two containers and their data are off limits too. A command you allow inside a container can still reach whatever that container has mounted, so read it before you tap Allow. |
 
 ## Setup (about 10 minutes)
 
