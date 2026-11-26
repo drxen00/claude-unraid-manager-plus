@@ -119,7 +119,7 @@ as_claude 'rm -rf /workspace/.unraid-watch && mv /workspace/.uw-real /workspace/
 # The fix server answers MCP and lists the tools; without a watcher socket (the
 # dummy token cannot log in) a call is refused, nothing is changed.
 mcp_out=$(as_claude 'printf "%s\n" "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\"}}" "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}" "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"container_restart\",\"arguments\":{\"name\":\"x\",\"reason\":\"test\"}}}" | timeout 20 /usr/local/share/claude-unraid-manager/watcher/node /usr/local/share/claude-unraid-manager/watcher/src/fix-mcp.mjs' 2>&1)
-if printf '%s\n' "$mcp_out" | jq -se '.[1].result.tools | map(.name) | index("container_update") and index("appdata_chown")' >/dev/null 2>&1; then pass "fix server lists the tools"; else fail "fix server tools/list: $(printf '%s' "$mcp_out" | head -c 400)"; fi
+if printf '%s\n' "$mcp_out" | jq -se '.[1].result.tools | map(.name) | index("container_update") and index("appdata_chown") and index("container_exec") and index("appdata_edit")' >/dev/null 2>&1; then pass "fix server lists the tools"; else fail "fix server tools/list: $(printf '%s' "$mcp_out" | head -c 400)"; fi
 if printf '%s\n' "$mcp_out" | jq -se '.[2].result.isError == true' >/dev/null 2>&1; then pass "fix call without the watcher is refused"; else fail "fix call: $(printf '%s' "$mcp_out" | tail -c 400)"; fi
 
 echo "lockdown: ownership"

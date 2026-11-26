@@ -52,8 +52,13 @@ With this, Claude can ask (and only after you tap Allow in Discord, every
 time) to:
   - update a container the way the Docker tab does (pull, re-create)
   - fix the owner of a folder below a container's appdata folder
-Nothing else: no array, disks, parity, shares or flash drive, and never this
-tool's own containers or data.
+  - run a command inside a container (you see the exact command first)
+  - change a config file below a container's appdata folder (you see the
+    change first; a backup copy is kept)
+Nothing outside containers and appdata: no array, disks, parity, shares or
+flash drive, and never this tool's own containers or data. A command inside
+a container reaches what that container has mounted; the question warns you
+when that includes folders outside appdata.
 
 Run these in the Unraid terminal as root (Unraid web UI, top right, terminal
 icon). The container does not do this for you.

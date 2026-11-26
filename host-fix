@@ -14,14 +14,25 @@
 # request only arrives as text in SSH_ORIGINAL_COMMAND. It is checked against
 # the commands below and run as a fixed argument list: nothing is handed to a
 # shell, globbing is off, and only the characters [A-Za-z0-9 _./:=,@+-] are
-# accepted at all.
+# accepted at all. Where a command needs more (the command to run inside a
+# container, a file's new content) that comes on stdin, size-capped, and is
+# passed on as one argument or written to a file, never parsed here.
 #
 # What it can do:
 #   update <container>          Unraid's own "Update": pull the image and
 #                               re-create the container from its template
 #   chown <uid>:<gid> <path>    give a folder below appdata/<app> to a user
-# It never touches the array, disks, parity, shares or the flash drive, and
-# never this tool's own containers or data.
+#   exec <container>            run the command on stdin inside a running
+#                               container (sh -c), as the container's user
+#   read <file>                 print a file below appdata/<app> (up to 1 MB)
+#   write <file> <sha256>       replace a file below appdata/<app> with stdin,
+#                               only if it still has that sha256; the old one
+#                               is kept next to it as <file>.claude-bak-<time>
+# Outside a container (exec), it never touches the array, disks, parity,
+# shares or the flash drive, and never this tool's own containers or data.
+# A command run inside a container can reach whatever that container has
+# mounted: the owner sees the exact command, and the watcher warns about
+# writable folders outside appdata, before they tap Allow.
 #
 #   host-fix <command …>            run locally (as root), same rules
 #   host-fix --print <command …>    print what would run, run nothing
@@ -29,7 +40,10 @@
 set -u -f
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export LC_ALL=C
-VERSION=1
+VERSION=2
+# Caps on what may come on stdin.
+MAX_CMD=8192
+MAX_FILE=1048576
 
 UPDATE=/usr/local/emhttp/plugins/dynamix.docker.manager/scripts/update_container
 TEMPLATES=/boot/config/plugins/dockerMan/templates-user
@@ -61,12 +75,47 @@ host-fix: changes on the Unraid host, each approved by the owner in Discord
                               its Unraid template (the Docker tab's Update)
   chown <uid>:<gid> <path>    change the owner of /mnt/<pool>/<appdata>/<app>[/…]
                               and everything in it (symlinks are not followed)
+  exec <container>            run the command on stdin inside a running
+                              container: sh -c "<command>" (up to 8 KB)
+  read <file>                 print a file below /mnt/<pool>/<appdata>/<app>/
+  write <file> <sha256>       replace that file with stdin (up to 1 MB) if it
+                              still has that sha256; keeps <file>.claude-bak-<time>
 USAGE
   exit 0
 }
 
 is_container() { [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$ ]]; }
 is_own()       { [[ $1 == claude-unraid-manager* || $1 == claude-docker-proxy* ]]; }
+
+# below_appdata <path> <need_file>: checks <path> is below
+# /mnt/<user|pool|diskN>/<appdata share>/<app>, before and after resolving
+# symlinks, and not this tool's own data. Sets real (the resolved path),
+# app and appdir. need_file=true: a regular file one level below <app> or more.
+below_appdata() {
+  local p=$1 need_file=$2 appdata share re
+  # The appdata share's name, from Settings → Docker ("appdata" by default).
+  appdata=$(sed -n 's/^DOCKER_APP_CONFIG_PATH="\(.*\)"$/\1/p' "$ROOT$DOCKER_CFG" 2>/dev/null)
+  share=$(basename "${appdata:-/mnt/user/appdata}")
+  [[ $share =~ ^[A-Za-z0-9_-]+$ ]] || share=appdata
+  # /mnt/<user|pool|diskN>/<share>/<app>[/…]; captures the share path, <app> and the rest.
+  re="^(/mnt/[A-Za-z0-9_.-]+/$share)/([A-Za-z0-9_.@+=,:-]+)(/.*)?\$"
+  [[ $p != *..* && $p != *//* ]] || refuse "path must not contain .. or //"
+  [[ $p =~ $re ]] || refuse "only paths below /mnt/<pool>/$share/<app> are allowed"
+  real=$(realpath -e -- "$ROOT$p" 2>/dev/null) || refuse "'$p' does not exist"
+  real=${real#"$ROOT"}
+  # Checked again after resolving symlinks, so a link cannot lead elsewhere.
+  [[ $real =~ $re ]] || refuse "'$p' resolves to '$real', outside appdata"
+  app=${BASH_REMATCH[2]}
+  appdir=${BASH_REMATCH[1]}/$app
+  if $need_file; then
+    [ -n "${BASH_REMATCH[3]}" ] || refuse "'$p' is a container's appdata folder itself, not a file in it"
+    [ -f "$ROOT$real" ] || refuse "'$p' is not a regular file"
+  fi
+  is_own "$app" && refuse "this tool's own data is not changed from here"
+  if [ -n "$(find "$ROOT$appdir" -maxdepth 3 -name "$MARKER" -print -quit 2>/dev/null)" ]; then
+    refuse "this tool's own data is not changed from here"
+  fi
+}
 
 [ ${#request} -le 512 ] || refuse "request too long"
 if [[ $request =~ [^A-Za-z0-9\ _./:=,@+-] ]]; then
@@ -116,31 +165,61 @@ case "${w[0]}" in
   chown)
     [ "$n" -eq 3 ] || refuse "chown <uid>:<gid> <path below appdata>"
     [[ $a1 =~ ^[0-9]{1,5}:[0-9]{1,5}$ ]] || refuse "owner must be numeric <uid>:<gid>"
-    p=${w[2]}
-    # The appdata share's name, from Settings → Docker ("appdata" by default).
-    appdata=$(sed -n 's/^DOCKER_APP_CONFIG_PATH="\(.*\)"$/\1/p' "$ROOT$DOCKER_CFG" 2>/dev/null)
-    share=$(basename "${appdata:-/mnt/user/appdata}")
-    [[ $share =~ ^[A-Za-z0-9_-]+$ ]] || share=appdata
-    # /mnt/<user|pool|diskN>/<share>/<app>[/…]; captures the share path and <app>.
-    re="^(/mnt/[A-Za-z0-9_.-]+/$share)/([A-Za-z0-9_.@+=,:-]+)(/.*)?\$"
-    [[ $p != *..* && $p != *//* ]] || refuse "path must not contain .. or //"
-    [[ $p =~ $re ]] || refuse "only folders below /mnt/<pool>/$share/<app> can be changed"
-    real=$(realpath -e -- "$ROOT$p" 2>/dev/null) || refuse "'$p' does not exist"
-    real=${real#"$ROOT"}
-    # Checked again after resolving symlinks, so a link cannot lead elsewhere.
-    [[ $real =~ $re ]] || refuse "'$p' resolves to '$real', outside appdata"
-    app=${BASH_REMATCH[2]}
-    appdir=${BASH_REMATCH[1]}/$app
-    is_own "$app" && refuse "this tool's own data is not changed from here"
-    if [ -n "$(find "$ROOT$appdir" -maxdepth 3 -name "$MARKER" -print -quit 2>/dev/null)" ]; then
-      refuse "this tool's own data is not changed from here"
-    fi
+    below_appdata "${w[2]}" false
     if $print; then echo "chown -R -h $a1 $real"; exit 0; fi
     # -h: change a symlink itself, never what it points to.
     chown -R -h -- "$a1" "$ROOT$real"
     rc=$?
     echo "chown finished with exit code $rc"
     ls -ldn -- "$ROOT$real"
+    exit "$rc" ;;
+
+  exec)
+    [ "$n" -eq 2 ] || refuse "exec <container>, with the command on stdin"
+    is_container "$a1" || refuse "'$a1' is not a container name"
+    is_own "$a1" && refuse "this tool's own containers are not changed from here"
+    # The command: one argument for sh -c inside the container, never run here.
+    script=$(head -c $((MAX_CMD + 1)))
+    [ -n "$script" ] || refuse "no command on stdin"
+    [ ${#script} -le $MAX_CMD ] || refuse "command longer than $MAX_CMD bytes"
+    if $print; then printf 'docker exec %s sh -c %q\n' "$a1" "$script"; exit 0; fi
+    [ "$(docker inspect --format '{{.State.Running}}' "$a1" 2>/dev/null)" = true ] \
+      || refuse "'$a1' is not running (start it first)"
+    # stdin closed (no -i), no tty, 2 minutes, output capped.
+    timeout 120 docker exec "$a1" sh -c "$script" </dev/null 2>&1 | head -c 65536
+    rc=${PIPESTATUS[0]}
+    [ "$rc" -eq 124 ] && echo "host-fix: stopped after 2 minutes"
+    echo "host-fix: exit code $rc"
+    exit "$rc" ;;
+
+  read)
+    [ "$n" -eq 2 ] || refuse "read <file below appdata>"
+    below_appdata "$a1" true
+    [ "$(stat -c %s -- "$ROOT$real")" -le $MAX_FILE ] || refuse "'$real' is larger than 1 MB"
+    if $print; then echo "cat $real"; exit 0; fi
+    cat -- "$ROOT$real"
+    exit $? ;;
+
+  write)
+    [ "$n" -eq 3 ] || refuse "write <file below appdata> <sha256 of its current content>"
+    [[ ${w[2]} =~ ^[0-9a-f]{64}$ ]] || refuse "the current content's sha256 is needed"
+    below_appdata "$a1" true
+    have=$(sha256sum -- "$ROOT$real" | cut -c1-64)
+    [ "$have" = "${w[2]}" ] || refuse "'$real' changed since it was read; read it again"
+    if $print; then echo "write $real"; exit 0; fi
+    tmp=$(mktemp -- "$ROOT$real.claude-tmp.XXXXXX") || { echo "host-fix: cannot write next to $real" >&2; exit 73; }
+    head -c $((MAX_FILE + 1)) > "$tmp"
+    if [ "$(stat -c %s -- "$tmp")" -gt $MAX_FILE ]; then rm -f -- "$tmp"; refuse "new content larger than 1 MB"; fi
+    bak="$real.claude-bak-$(date +%Y%m%d-%H%M%S)"
+    # The backup first; the new file gets the old one's owner and mode, then
+    # replaces it in one step.
+    if ! cp -p -- "$ROOT$real" "$ROOT$bak"; then rm -f -- "$tmp"; echo "host-fix: could not make the backup; nothing changed" >&2; exit 73; fi
+    chown --reference="$ROOT$real" -- "$tmp" && chmod --reference="$ROOT$real" -- "$tmp" \
+      && mv -f -- "$tmp" "$ROOT$real"
+    rc=$?
+    [ "$rc" -eq 0 ] || rm -f -- "$tmp"
+    echo "write finished with exit code $rc"
+    echo "backup: $bak"
     exit "$rc" ;;
 
   *) refuse "unknown command '${w[0]}'" ;;
