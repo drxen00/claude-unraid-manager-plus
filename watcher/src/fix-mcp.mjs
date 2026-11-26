@@ -9,6 +9,16 @@ import { pathToFileURL } from 'node:url';
 import { APPROVAL_MS, FIX_HELP, FIX_TOOLS } from './fix.mjs';
 
 const SOCKET = process.env.UNRAID_FIX_SOCKET || '/run/unraid-watch/fix.sock';
+// Set in the managed MCP config when Wraith is on: offer the permission tool
+// the Wraith chats use (--permission-prompt-tool mcp__fix__wraith_permission).
+const WRAITH = process.env.UNRAID_WRAITH_PERM === '1';
+// The Wraith chat this Claude runs for, when Claude Code passes it down.
+const ORIGIN = process.env.WRAITH_CHAT_ID || null;
+
+export const PERMISSION_TOOL = {
+  description: 'Used by Claude Code itself to ask the owner, in their Wraith chat, whether a tool may run. Not for direct use.',
+  inputSchema: { type: 'object', properties: { tool_name: { type: 'string' }, input: { type: 'object' }, tool_use_id: { type: 'string' } }, required: ['tool_name'] },
+};
 // Waiting for the owner plus the slowest fix (an image pull).
 const CALL_TIMEOUT_MS = APPROVAL_MS + 20 * 60_000;
 
@@ -43,7 +53,7 @@ export function callWatcher(req, { socket = SOCKET, timeoutMs = CALL_TIMEOUT_MS 
   });
 }
 
-export async function handleMessage(msg, { call = callWatcher } = {}) {
+export async function handleMessage(msg, { call = callWatcher, wraith = WRAITH, origin = ORIGIN } = {}) {
   if (!msg || typeof msg !== 'object' || msg.jsonrpc !== '2.0') return null;
   const { id, method, params } = msg;
   if (id === undefined || id === null) return null; // a notification: nothing to answer
@@ -60,13 +70,19 @@ export async function handleMessage(msg, { call = callWatcher } = {}) {
       return ok({});
     case 'tools/list':
       return ok({
-        tools: Object.entries(FIX_TOOLS).map(([name, t]) => ({ name, description: `${t.description} ${FIX_HELP}`, inputSchema: t.inputSchema })),
+        tools: [
+          ...Object.entries(FIX_TOOLS).map(([name, t]) => ({ name, description: `${t.description} ${FIX_HELP}`, inputSchema: t.inputSchema })),
+          ...(wraith ? [{ name: 'wraith_permission', ...PERMISSION_TOOL }] : []),
+        ],
       });
     case 'tools/call': {
       const name = String(params?.name ?? '');
-      if (!Object.hasOwn(FIX_TOOLS, name)) return { jsonrpc: '2.0', id, error: { code: -32602, message: `Unknown tool: ${name}` } };
+      const known = Object.hasOwn(FIX_TOOLS, name) || (wraith && name === 'wraith_permission');
+      if (!known) return { jsonrpc: '2.0', id, error: { code: -32602, message: `Unknown tool: ${name}` } };
       const args = params?.arguments && typeof params.arguments === 'object' ? params.arguments : {};
-      const r = await call({ tool: name, args });
+      const r = await call({ tool: name, args, ...(origin ? { origin } : {}) });
+      // The permission answer is exactly one text block holding its JSON.
+      if (name === 'wraith_permission') return ok({ content: [{ type: 'text', text: r.ok ? r.text : JSON.stringify({ behavior: 'deny', message: r.text || 'No answer.' }) }] });
       return ok({ content: [{ type: 'text', text: r.text || (r.ok ? 'Done.' : 'Failed.') }], isError: !r.ok });
     }
     default:

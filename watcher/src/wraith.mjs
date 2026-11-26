@@ -59,7 +59,8 @@ export function startWraith({ url, token, api, linkedUser, onName = () => {}, lo
   socket.on('request', async (req, ack) => {
     if (typeof ack !== 'function') return;
     try {
-      const res = await api.handle({ method: req?.method, path: req?.path, user: req?.user, json: req?.json });
+      const raw = typeof req?.raw === 'string' ? Buffer.from(req.raw, 'base64') : null;
+      const res = await api.handle({ method: req?.method, path: req?.path, user: req?.user, json: req?.json, raw });
       ack(encodeAnswer(res));
     } catch (e) {
       log.error(`unraid-watch: Wraith request ${req?.method} ${req?.path} failed: ${e?.stack ?? e}`);
@@ -80,6 +81,12 @@ export function startWraith({ url, token, api, linkedUser, onName = () => {}, lo
       const user = linkedUser();
       if (!user || !socket.connected) return;
       socket.emit('attention', { type: 'panel.alert', wraithUser: user, ...event });
+    },
+    /** claude.attention (permission, done) for the linked owner's phone. */
+    notice(event) {
+      const user = linkedUser();
+      if (!user || !socket.connected) return;
+      socket.emit('attention', { ...event, wraithUser: user });
     },
     close() { socket.close(); },
   };

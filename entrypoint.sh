@@ -109,15 +109,21 @@ esac
 
 # The fix tools (watcher/src/fix-mcp.mjs): Claude's only way to change
 # anything. The server holds no secrets; every call goes to the watcher's
-# socket and waits for the owner's Allow in Discord. Listed only when the
-# watcher runs, since nobody could approve anything otherwise.
+# socket and waits for the owner's Allow in Discord or in their Wraith chat.
+# Listed only when the watcher runs, since nobody could approve anything
+# otherwise. With Wraith on it also offers wraith_permission, the tool the
+# Wraith chats ask the owner through (--permission-prompt-tool).
 WATCH_DIR=/usr/local/share/claude-unraid-manager/watcher
 FIX_SOCKET_DIR=/run/unraid-watch
 DISCORD_OK=false
 if [ -n "${DISCORD_BOT_TOKEN:-}" ] && [[ "${DISCORD_USER_ID:-}" =~ ^[0-9]{17,20}$ ]]; then DISCORD_OK=true; fi
-if [ "$DISCORD_OK" = true ]; then
-  jq --arg node "$WATCH_DIR/node" --arg mcp "$WATCH_DIR/src/fix-mcp.mjs" --arg sock "$FIX_SOCKET_DIR/fix.sock" \
-    '.mcpServers.fix = {type: "stdio", command: $node, args: [$mcp], env: {UNRAID_FIX_SOCKET: $sock}}' \
+WRAITH_ON=false
+if [ -n "${WRAITH_PANEL_CODE:-}" ]; then WRAITH_ON=true; fi
+if [ "$DISCORD_OK" = true ] || [ "$WRAITH_ON" = true ]; then
+  perm=0
+  if [ "$WRAITH_ON" = true ]; then perm=1; fi
+  jq --arg node "$WATCH_DIR/node" --arg mcp "$WATCH_DIR/src/fix-mcp.mjs" --arg sock "$FIX_SOCKET_DIR/fix.sock" --arg perm "$perm" \
+    '.mcpServers.fix = {type: "stdio", command: $node, args: [$mcp], env: {UNRAID_FIX_SOCKET: $sock, UNRAID_WRAITH_PERM: $perm}}' \
     "$MANAGED_MCP" > "$MANAGED_MCP.tmp" && mv "$MANAGED_MCP.tmp" "$MANAGED_MCP"
 else
   jq 'del(.mcpServers.fix)' "$MANAGED_MCP" > "$MANAGED_MCP.tmp" && mv "$MANAGED_MCP.tmp" "$MANAGED_MCP"
@@ -186,8 +192,6 @@ fi
 # after the owner's tap.
 # The same watcher also serves the Wraith server panel (watcher/src/wraith.mjs)
 # when a Wraith connection code is set: Discord, Wraith, or both.
-WRAITH_ON=false
-if [ -n "${WRAITH_PANEL_CODE:-}" ]; then WRAITH_ON=true; fi
 if [ -n "${DISCORD_BOT_TOKEN:-}" ] || [ "$WRAITH_ON" = true ]; then
   if [ -n "${DISCORD_BOT_TOKEN:-}" ] && [ "$DISCORD_OK" != true ]; then
     echo "Discord: bot token is set, but 'Discord user ID' is empty or not a number. Watcher not started."
