@@ -26,6 +26,8 @@ import { msUntil } from './schedule.mjs';
 import { AlertFeed, LinkCodes, createPanelApi } from './panel.mjs';
 import { SysSampler } from './sysinfo.mjs';
 import { serveAdminSocket, startWraith } from './wraith.mjs';
+import { HostTerminal } from './terminal.mjs';
+import { spawn } from 'node:child_process';
 
 const HELP = [
   'Talk to me normally, e.g. "why is plex slow?", "don\'t tell me about disk space until a disk hits 99%", "let me know when the parity check finishes", "snooze that till Friday". Rules apply right away and come with an Undo button.',
@@ -513,7 +515,44 @@ async function main() {
       psCache = { at: Date.now(), rows: ps.code === 0 ? parseDockerPs(ps.stdout) : containers };
       return psCache.rows;
     };
+
+    // #terminal: a root shell on the host, only when the owner turned it on
+    // (template) and allowed its key on the host (wraith-terminal-setup).
+    let terminal = null;
+    let terminalHint = 'The terminal is off. To turn it on: set "Wraith terminal" to host in the Unraid template, then run docker exec -it claude-unraid-manager wraith-terminal-setup.';
+    if (cfg.wraithTerminal) {
+      const termKey = join(stateDir, 'wraith-terminal-key');
+      if (!(await exists(termKey))) {
+        const k = await run('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-C', 'claude-unraid-manager-wraith-terminal', '-f', termKey]);
+        if (k.code !== 0) console.error(`unraid-watch: could not create the terminal key: ${(k.stderr || k.stdout).trim().slice(0, 200)}`);
+      }
+      const sshArgs = (tty) => [
+        tty ? '-tt' : '-T', '-i', termKey, '-p', String(cfg.sshPort),
+        '-o', 'BatchMode=yes', '-o', 'IdentitiesOnly=yes', '-o', 'ConnectTimeout=5', '-o', 'LogLevel=ERROR',
+        '-o', 'StrictHostKeyChecking=accept-new', '-o', `UserKnownHostsFile=${join(stateDir, 'known_hosts')}`,
+        `root@${cfg.sshHost}`, '--',
+      ];
+      if (!cfg.sshHost) {
+        terminalHint = 'The terminal needs "Unraid SSH host" in the template (the server\'s LAN IP).';
+      } else {
+        const probe = await run('ssh', [...sshArgs(false), 'echo wraith-terminal-ok'], { timeoutMs: 15_000 });
+        if (probe.code === 0 && probe.stdout.includes('wraith-terminal-ok')) {
+          terminal = new HostTerminal({
+            spawnShell: (script) => spawn('ssh', [...sshArgs(true), script], { stdio: ['pipe', 'pipe', 'pipe'] }),
+            emit: (e) => wraith?.emitEvent(wraithLink?.user, e),
+            audit: (e) => book.audit(e),
+          });
+          console.log(`unraid-watch: Wraith terminal: root shell on ${cfg.sshHost} works`);
+        } else {
+          terminalHint = 'The terminal is turned on in the template, but the host does not accept its key yet: run docker exec -it claude-unraid-manager wraith-terminal-setup and follow the steps, then restart the container.';
+          console.log(`unraid-watch: Wraith terminal not working yet (${(probe.stderr || probe.stdout).trim().slice(0, 200) || `exit ${probe.code}`}); run wraith-terminal-setup`);
+        }
+      }
+    }
+
     const api = createPanelApi({
+      terminal,
+      terminalHint,
       link: () => wraithLink,
       setLink: async (l) => {
         // The old account's open views lock at once (sent while it is still

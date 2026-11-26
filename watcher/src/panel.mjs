@@ -257,16 +257,17 @@ export function createPanelApi(deps) {
   const notLinked = () => err(403, 'not_linked', 'Link your Wraith account to this server first.', { linkHint: deps.linkHint });
 
   function me(link) {
+    const term = Boolean(deps.terminal);
     return {
       linked: true,
       username: link.name || 'Owner',
       role: 'Owner',
       scope: 'full',
-      runAs: 'claude',
-      can: { servicesView: true, servicesControl: true, uptimeView: false, power: false, terminal: false, claude: false },
+      runAs: term ? 'root' : 'claude',
+      can: { servicesView: true, servicesControl: true, uptimeView: false, power: false, terminal: term, claude: Boolean(deps.claude) },
       why: {
-        terminal: 'There is no terminal here. For a shell, use the Unraid web terminal.',
-        claude: 'Claude in Wraith is not ready yet. Use the Claude app or Discord for now.',
+        terminal: term ? null : deps.terminalHint ?? 'The terminal is off. For a shell, use the Unraid web terminal.',
+        claude: deps.claude ? null : 'Claude in Wraith is not ready yet. Use the Claude app or Discord for now.',
       },
     };
   }
@@ -376,7 +377,20 @@ export function createPanelApi(deps) {
       return err(403, 'not_allowed', 'Restarting or shutting down Unraid is never done from Wraith. Use the Unraid web UI.');
     }
     if (segs[0] === 'groups') return err(404, 'not_found', 'There are no stacks on this server.');
-    if (segs[0] === 'terminal') return err(403, 'not_allowed', 'There is no terminal here. For a shell, use the Unraid web terminal.');
+    if (segs[0] === 'terminal') {
+      const t = deps.terminal;
+      if (!t) return err(403, 'not_allowed', deps.terminalHint ?? 'The terminal is off. For a shell, use the Unraid web terminal.');
+      if (m === 'GET' && route === 'terminal/history') return ok(t.history({ limit: query.get('limit'), before: query.get('before') }));
+      try {
+        if (m === 'POST' && route === 'terminal/input') return ok(await t.input(json?.text));
+        if (m === 'POST' && route === 'terminal/key') return ok({ ok: true, sent: t.key(String(json?.key ?? '')) });
+      } catch (e) {
+        return err(400, e.code ?? 'bad_request', e.message);
+      }
+      if (m === 'POST' && route === 'terminal/clear') { t.clear(); return ok({ ok: true }); }
+      if (m === 'POST' && route === 'terminal/reset') { t.reset(); return ok({ ok: true }); }
+      return err(404, 'not_found', 'Not available on this server.');
+    }
     if (segs[0] === 'claude') return err(403, 'not_allowed', 'Claude in Wraith is not ready yet.');
 
     /* #alerts */
