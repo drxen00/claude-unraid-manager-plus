@@ -793,8 +793,10 @@ refused_hf rm -rf /
 refused_hf mdcmd stop
 refused_hf sh -c id
 # exec: the command comes on stdin and is passed on as one argument.
-out=$(printf 'grep -i error /config/logs/x.txt; echo "$HOME"' | env -u SSH_ORIGINAL_COMMAND HOST_FIX_TEST_ROOT="$HF" bash "$ROOT/host-fix" --print exec sonarr 2>&1)
-want=$(printf 'docker exec sonarr sh -c %q' 'grep -i error /config/logs/x.txt; echo "$HOME"')
+# shellcheck disable=SC2016 # "$HOME" is for the container's shell, not this one
+xcmd='grep -i error /config/logs/x.txt; echo "$HOME"'
+out=$(printf '%s' "$xcmd" | env -u SSH_ORIGINAL_COMMAND HOST_FIX_TEST_ROOT="$HF" bash "$ROOT/host-fix" --print exec sonarr 2>&1)
+want=$(printf 'docker exec sonarr sh -c %q' "$xcmd")
 if [ "$out" = "$want" ]; then pass "host-fix: exec passes the command as one argument"; else fail "host-fix exec: '$out' (want '$want')"; fi
 refused_hf_in() {
   local input=$1 out st
