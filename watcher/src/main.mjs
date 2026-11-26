@@ -7,6 +7,7 @@
 // container's entrypoint as root, so Claude's user cannot read its Discord
 // token or its state; Claude itself runs as that user.
 import { randomBytes } from 'node:crypto';
+import * as fsp from 'node:fs/promises';
 import { access, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { ActionBook, CATALOG, describeOffer, validateSuggestions } from './actions.mjs';
@@ -26,6 +27,9 @@ import { msUntil } from './schedule.mjs';
 import { AlertFeed, LinkCodes, createPanelApi } from './panel.mjs';
 import { SysSampler } from './sysinfo.mjs';
 import { serveAdminSocket, startWraith } from './wraith.mjs';
+import { HostTerminal } from './terminal.mjs';
+import { ClaudeChats } from './claudechat.mjs';
+import { spawn } from 'node:child_process';
 
 const HELP = [
   'Talk to me normally, e.g. "why is plex slow?", "don\'t tell me about disk space until a disk hits 99%", "let me know when the parity check finishes", "snooze that till Friday". Rules apply right away and come with an Undo button.',
@@ -184,13 +188,14 @@ async function main() {
 
   // ── Wraith server panel (wraith.mjs, panel.mjs) ──
   const wraithPath = join(stateDir, 'wraith.json');
-  const wraithState = await readJson(wraithPath, {});
+  const wraithState = (await readJson(wraithPath, {})) ?? {};
   let wraithLink = wraithState?.link && typeof wraithState.link.user === 'string' ? wraithState.link : null;
-  const saveWraith = (alertState) => writeJson(wraithPath, { link: wraithLink, alerts: alertState ?? alertFeed.state });
+  const saveWraith = (alertState) => writeJson(wraithPath, { link: wraithLink, alerts: alertState ?? alertFeed.state, chatNames: wraithState?.chatNames ?? {} });
   const alertFeed = new AlertFeed(wraithState?.alerts, { save: (s) => saveWraith(s) });
   const linkCodes = new LinkCodes();
   let wraith = null;
   let wraithName = 'Unraid';
+  let chats = null;
 
   const ctx = () => ({ prefs, history: [...history] });
 
@@ -407,8 +412,16 @@ async function main() {
 
   // One Allow/Deny question per change Claude asks for (fix.mjs).
   const approvals = new Map();
-  async function askOwner({ what, detail, reason, source }) {
-    // Allow / Deny lives in Discord for now; without it nobody can say yes.
+  async function askOwner({ what, detail, reason, source, origin }) {
+    // A Wraith chat is working on this: ask there (claudechat.mjs).
+    if (chats?.chatFor(origin)) {
+      const summary = `${what.replace(/**/g, '')}${source ? ` (${source})` : ''}${detail ? `
+${detail.replace(/**/g, '')}` : ''}${reason ? `
+Why: ${reason}` : ''}`;
+      const d = await chats.ask(origin, { tool: 'Claude wants to change something', summary });
+      if (d) return d;
+    }
+    // Otherwise Discord; without it nobody can say yes.
     if (!discordUp) return 'deny';
     const id = randomBytes(9).toString('base64url');
     const from = source ? ` (${source})` : '';
@@ -463,6 +476,7 @@ async function main() {
     audit: (e) => book.audit(e),
     containers: () => containers,
     notify: (text) => say(text),
+    permission: (origin, args) => (chats ? chats.permission(origin, args) : { behavior: 'deny', message: 'Wraith is not set up.' }),
     policy: () => {
       if (activeMode === 'report') return { refuse: 'Fix tools are not used during reports and alerts. Say what you would change; the owner can tap Fix it.' };
       return { source: activeMode === 'chat' ? 'you asked in this chat' : activeMode === 'fix' ? 'Fix it' : 'from your Claude app session' };
@@ -513,7 +527,74 @@ async function main() {
       psCache = { at: Date.now(), rows: ps.code === 0 ? parseDockerPs(ps.stdout) : containers };
       return psCache.rows;
     };
+
+    // #terminal: a root shell on the host, only when the owner turned it on
+    // (template) and allowed its key on the host (wraith-terminal-setup).
+    let terminal = null;
+    let terminalHint = 'The terminal is off. To turn it on: set "Wraith terminal" to host in the Unraid template, then run docker exec -it claude-unraid-manager wraith-terminal-setup.';
+    if (cfg.wraithTerminal) {
+      const termKey = join(stateDir, 'wraith-terminal-key');
+      if (!(await exists(termKey))) {
+        const k = await run('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-C', 'claude-unraid-manager-wraith-terminal', '-f', termKey]);
+        if (k.code !== 0) console.error(`unraid-watch: could not create the terminal key: ${(k.stderr || k.stdout).trim().slice(0, 200)}`);
+      }
+      const sshArgs = (tty) => [
+        tty ? '-tt' : '-T', '-i', termKey, '-p', String(cfg.sshPort),
+        '-o', 'BatchMode=yes', '-o', 'IdentitiesOnly=yes', '-o', 'ConnectTimeout=5', '-o', 'LogLevel=ERROR',
+        '-o', 'StrictHostKeyChecking=accept-new', '-o', `UserKnownHostsFile=${join(stateDir, 'known_hosts')}`,
+        `root@${cfg.sshHost}`, '--',
+      ];
+      if (!cfg.sshHost) {
+        terminalHint = 'The terminal needs "Unraid SSH host" in the template (the server\'s LAN IP).';
+      } else {
+        const probe = await run('ssh', [...sshArgs(false), 'echo wraith-terminal-ok'], { timeoutMs: 15_000 });
+        if (probe.code === 0 && probe.stdout.includes('wraith-terminal-ok')) {
+          terminal = new HostTerminal({
+            spawnShell: (script) => spawn('ssh', [...sshArgs(true), script], { stdio: ['pipe', 'pipe', 'pipe'] }),
+            emit: (e) => wraith?.emitEvent(wraithLink?.user, e),
+            audit: (e) => book.audit(e),
+          });
+          console.log(`unraid-watch: Wraith terminal: root shell on ${cfg.sshHost} works`);
+        } else {
+          terminalHint = 'The terminal is turned on in the template, but the host does not accept its key yet: run docker exec -it claude-unraid-manager wraith-terminal-setup and follow the steps, then restart the container.';
+          console.log(`unraid-watch: Wraith terminal not working yet (${(probe.stderr || probe.stdout).trim().slice(0, 200) || `exit ${probe.code}`}); run wraith-terminal-setup`);
+        }
+      }
+    }
+
+    // The Claude channel: Claude Code as Claude's user, asking in Wraith.
+    let claudeVersion;
+    chats = new ClaudeChats({
+      home: cfg.claudeHome,
+      workspace: '/workspace',
+      fs: fsp,
+      uid: Number((await run('id', ['-u', cfg.claudeUser])).stdout.trim()) || 99,
+      gid: cfg.claudeGid,
+      spawnClaude: (args, { cwd, chatId }) => spawn('runuser', [
+        '-u', cfg.claudeUser, '--',
+        'env', '-u', 'UNRAID_API_KEY', '-u', 'DISCORD_BOT_TOKEN', '-u', 'WRAITH_PANEL_CODE',
+        `HOME=${cfg.claudeHome}`, `USER=${cfg.claudeUser}`, `LOGNAME=${cfg.claudeUser}`, `WRAITH_CHAT_ID=${chatId}`,
+        'claude', ...args,
+      ], { cwd, detached: true, stdio: ['pipe', 'pipe', 'pipe'] }),
+      // The whole process group: runuser and the claude under it.
+      signal: (child, sig) => { try { process.kill(-child.pid, sig); } catch { try { child.kill(sig); } catch { /* gone */ } } },
+      emit: (e) => wraith?.emitEvent(wraithLink?.user, e),
+      notify: (e) => wraith?.notice(e),
+      names: () => wraithState.chatNames ?? {},
+      saveNames: async (n) => { wraithState.chatNames = n; await saveWraith(); },
+    });
+
     const api = createPanelApi({
+      terminal,
+      terminalHint,
+      claude: chats,
+      claudeVersion: async () => {
+        if (claudeVersion === undefined) {
+          const v = await asClaude(cfg, ['claude', '--version'], { timeoutMs: 20_000 });
+          claudeVersion = v.code === 0 ? v.stdout.trim().split(/s+/)[0] || null : null;
+        }
+        return claudeVersion;
+      },
       link: () => wraithLink,
       setLink: async (l) => {
         // The old account's open views lock at once (sent while it is still

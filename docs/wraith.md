@@ -51,21 +51,81 @@ That's it. The container's log says
 |---|---|
 | Look | Load, memory, disks, containers, container logs, open problems |
 | Change | Start, stop or restart **one container** when you tap the button. It's checked again right before it runs, at most 5 an hour (shared with the Discord buttons), and every tap is logged (`unraid-watch audit:`). |
-| Never | Disks, array, parity, shares, the USB stick, Unraid settings, a terminal, rebooting or shutting down the server, or anything on this tool's own containers. |
-| Not yet | Claude in Wraith, and updating a container from Wraith. Use Discord or the Claude app for those. |
+| Claude | Chat with Claude on this server (see below). Anything it wants to do that its rules don't allow outright waits for your **Allow** in the chat. |
+| Terminal | Off unless you turn it on. When on, a **root shell on the Unraid host** (see below). |
+| Never (without the terminal) | Disks, array, parity, shares, the USB stick, Unraid settings directly, rebooting or shutting down the server, or anything on this tool's own containers. |
 
 Only the one Wraith account you linked can use it. Anyone else in the space
 sees "Link your panel account" and nothing else, and linking needs a code
 from your server's terminal.
 
+## Claude
+
+Create a channel of type **Claude** in the space. Each chat is Claude Code on
+this server, the same as the Claude app session:
+- It runs as Claude's own limited user, in `/workspace`.
+- It has the same safety rules and the same tools: logs, docker inspect,
+  the read-only host checks, and appdata if mounted.
+- Chats are saved the same way, so you can continue a Wraith chat in the
+  Claude app and the other way round.
+
+- **Permissions.** When Claude wants to run something its rules don't allow
+  by themselves, the chat shows the request with **Allow** and **Deny**, and
+  your phone gets a push. Nothing runs until you tap.
+- **Fixes.** Restarting, updating, running a command inside a container or
+  editing a config file are asked the same way, right in the chat, with the
+  exact command or change shown. Fix requests from the Claude app, or from
+  Discord, still go to Discord.
+- **Model, effort and mode** can be changed per chat. Claude restarts on the
+  same chat to switch. "Bypass permissions" is not available.
+- At most 3 chats run at once. **End chat** stops one; the transcript stays.
+
+## Terminal (a root shell, opt-in)
+
+The #terminal channel can give you a **root shell on the Unraid host**: the
+same power as the Unraid web terminal, from Wraith. It is **off** until you
+turn it on, because of what it means. Anyone who controls the Wraith server
+could, in theory, type into it as you, and so get full control of the server,
+its array and your data.
+
+To turn it on:
+
+1. Unraid **Docker** tab → **claude-unraid-manager** → **Edit** → set
+   **Wraith terminal** to `host` → **Apply**.
+2. In the Unraid terminal:
+   ```
+   docker exec -it claude-unraid-manager wraith-terminal-setup
+   ```
+   Run the commands it prints. They copy a small wrapper to the flash drive
+   and allow the terminal's own key, which is separate from the host-fix key.
+3. Restart the container. The log says
+   `unraid-watch: Wraith terminal: root shell on … works`.
+4. Create a channel of type **Terminal** in the space.
+
+How it behaves:
+- One command at a time. Its output streams in.
+- `cd` carries over to the next command. Variables don't.
+- Ctrl-C, Ctrl-D and the like are the buttons under the input.
+- If a command asks for input, what you type goes to it, and it's shown as
+  dots.
+- Full-screen programs (top, vim, mc) don't work here. Use the Unraid web
+  terminal for those.
+
+Every command it runs is written to the Unraid syslog first. To read that
+record, run this in the Unraid terminal:
+`grep claude-wraith-terminal /var/log/syslog`.
+
+To turn it off: set **Wraith terminal** back to `off`, or delete its line
+from `/root/.ssh/authorized_keys`.
+
 ## Good to know
 
 - **Who you're trusting.** Wraith's server sends each request in your name.
   Whoever runs that server can technically do whatever you can do from these
-  channels: look, and start, stop or restart containers. They still can't do
-  anything from the "Never" row above, because your server refuses those
-  itself, whoever asks. Discord works the same way: Discord itself could act
-  through your bot.
+  channels: look, start, stop or restart containers, chat with Claude and tap
+  Allow, and, if you turned it on, use the root terminal. Without the
+  terminal, your server still refuses the "Never" row above whoever asks.
+  Discord works the same way: Discord itself could act through your bot.
 - **The code.** It sits in the container's settings, like the Discord token.
   Claude runs as a separate user and doesn't get it. One known gap is the
   same as for the Discord token: `docker inspect` on this container shows it,

@@ -1,0 +1,26 @@
+#!/bin/bash
+# host-shell — the Wraith #terminal's way in to the Unraid host: a root
+# shell, one command per SSH connection. This is full root access, on purpose:
+# the owner asked for it (docs/wraith.md, "Terminal").
+#
+# You install it on the flash drive yourself and bind it to the watcher's
+# terminal key in /root/.ssh/authorized_keys (wraith-terminal-setup prints
+# the steps):
+#
+#   restrict,pty,command="/bin/bash /boot/config/claude-unraid/host-shell" ssh-ed25519 AAAA… claude-unraid-manager-wraith-terminal
+#
+# It adds one thing over a plain key: every command it is given goes to the
+# Unraid syslog first (tag claude-wraith-terminal), so there is a record on
+# the host itself, outside the container and outside Wraith.
+#
+# To turn it off: delete that line from /root/.ssh/authorized_keys.
+set -u
+cmd=${SSH_ORIGINAL_COMMAND-}
+if [ -z "$cmd" ]; then
+  echo "host-shell: no command (this key runs one command per connection)" >&2
+  exit 64
+fi
+# The watcher wraps each command in a few fixed lines (directory, exit code);
+# the log gets all of it, newlines as " ; ", cut at 900 characters.
+logger -t claude-wraith-terminal -- "$(printf '%s' "$cmd" | tr '\n' ';' | sed 's/;/ ; /g' | head -c 900)"
+exec /bin/bash -c "$cmd"

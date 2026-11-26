@@ -249,8 +249,10 @@ export const FIX_HELP =
  *   policy() → { refuse?: text, source: label }
  */
 export class FixBroker {
-  constructor({ askOwner, run, hostFix, audit, containers = () => [], policy = () => ({ source: '' }), now = () => Date.now(), notify = async () => {} }) {
-    Object.assign(this, { askOwner, run, hostFix, audit, containers, policy, now, notify });
+  // permission(origin, args): the Wraith chat's --permission-prompt-tool, answered
+  // by the owner in that chat (claudechat.mjs). Not a fix: no limits apply.
+  constructor({ askOwner, run, hostFix, audit, containers = () => [], policy = () => ({ source: '' }), now = () => Date.now(), notify = async () => {}, permission = null }) {
+    Object.assign(this, { askOwner, run, hostFix, audit, containers, policy, now, notify, permission });
     this.done = [];
     this.asked = [];
     this.waiting = false;
@@ -258,6 +260,13 @@ export class FixBroker {
 
   async handle(req) {
     const name = String(req?.tool ?? '');
+    // origin: the Wraith chat the request came from (WRAITH_CHAT_ID), if any.
+    const origin = typeof req?.origin === 'string' ? req.origin : null;
+    if (name === 'wraith_permission') {
+      if (!this.permission) return { ok: true, text: JSON.stringify({ behavior: 'deny', message: 'Wraith is not set up on this server.' }) };
+      const r = await this.permission(origin, req.args ?? {});
+      return { ok: true, text: JSON.stringify(r) };
+    }
     const tool = Object.hasOwn(FIX_TOOLS, name) ? FIX_TOOLS[name] : null;
     if (!tool) return { ok: false, text: `Unknown fix tool "${name}".` };
     const p = this.policy();
@@ -292,7 +301,7 @@ export class FixBroker {
       what = tool.what(args);
       detail = tool.detail ? tool.detail(args) : '';
       this.asked.push(this.now());
-      decision = await this.askOwner({ tool: name, what, detail, reason, source: p.source });
+      decision = await this.askOwner({ tool: name, what, detail, reason, source: p.source, origin });
     } catch (err) {
       decision = 'error';
       console.error(`unraid-watch: could not ask the owner: ${err.message ?? err}`);

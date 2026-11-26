@@ -6,7 +6,7 @@
 // server could send any of them in the linked owner's name.
 //
 // So: nothing here touches disks, the array, parity, the flash drive or
-// Unraid's settings; there is no terminal and no reboot; container changes
+// Unraid's settings; no reboot; the terminal and Claude only when turned on; container changes
 // go through the same ActionBook as the Discord buttons (state re-checked,
 // at most a few an hour, audited); and every request but `link` needs the
 // one Wraith account that was linked with a code from this server.
@@ -257,16 +257,17 @@ export function createPanelApi(deps) {
   const notLinked = () => err(403, 'not_linked', 'Link your Wraith account to this server first.', { linkHint: deps.linkHint });
 
   function me(link) {
+    const term = Boolean(deps.terminal);
     return {
       linked: true,
       username: link.name || 'Owner',
       role: 'Owner',
       scope: 'full',
-      runAs: 'claude',
-      can: { servicesView: true, servicesControl: true, uptimeView: false, power: false, terminal: false, claude: false },
+      runAs: term ? 'root' : 'claude',
+      can: { servicesView: true, servicesControl: true, uptimeView: false, power: false, terminal: term, claude: Boolean(deps.claude) },
       why: {
-        terminal: 'There is no terminal here. For a shell, use the Unraid web terminal.',
-        claude: 'Claude in Wraith is not ready yet. Use the Claude app or Discord for now.',
+        terminal: term ? null : deps.terminalHint ?? 'The terminal is off. For a shell, use the Unraid web terminal.',
+        claude: deps.claude ? null : 'Claude in Wraith is not ready yet. Use the Claude app or Discord for now.',
       },
     };
   }
@@ -309,7 +310,7 @@ export function createPanelApi(deps) {
     };
   }
 
-  async function handle({ method, path, user, json }) {
+  async function handle({ method, path, user, json, raw = null }) {
     const p = parsePath(path);
     if (!p || typeof user !== 'string' || !UUID.test(user)) return err(400, 'bad_request', 'Bad request.');
     const { segs, query } = p;
@@ -376,8 +377,50 @@ export function createPanelApi(deps) {
       return err(403, 'not_allowed', 'Restarting or shutting down Unraid is never done from Wraith. Use the Unraid web UI.');
     }
     if (segs[0] === 'groups') return err(404, 'not_found', 'There are no stacks on this server.');
-    if (segs[0] === 'terminal') return err(403, 'not_allowed', 'There is no terminal here. For a shell, use the Unraid web terminal.');
-    if (segs[0] === 'claude') return err(403, 'not_allowed', 'Claude in Wraith is not ready yet.');
+    if (segs[0] === 'terminal') {
+      const t = deps.terminal;
+      if (!t) return err(403, 'not_allowed', deps.terminalHint ?? 'The terminal is off. For a shell, use the Unraid web terminal.');
+      if (m === 'GET' && route === 'terminal/history') return ok(t.history({ limit: query.get('limit'), before: query.get('before') }));
+      try {
+        if (m === 'POST' && route === 'terminal/input') return ok(await t.input(json?.text));
+        if (m === 'POST' && route === 'terminal/key') return ok({ ok: true, sent: t.key(String(json?.key ?? '')) });
+      } catch (e) {
+        return err(400, e.code ?? 'bad_request', e.message);
+      }
+      if (m === 'POST' && route === 'terminal/clear') { t.clear(); return ok({ ok: true }); }
+      if (m === 'POST' && route === 'terminal/reset') { t.reset(); return ok({ ok: true }); }
+      return err(404, 'not_found', 'Not available on this server.');
+    }
+    if (segs[0] === 'claude') {
+      const c = deps.claude;
+      if (!c) return err(403, 'not_allowed', 'Claude in Wraith is not set up on this server.');
+      try {
+        const id = segs[2];
+        if (m === 'GET' && route === 'claude/options') return ok(c.options());
+        if (m === 'GET' && route === 'claude/sessions') return ok({ sessions: await c.sessions() });
+        if (m === 'GET' && route === 'claude/projects') return ok(await c.projectDirs());
+        if (m === 'GET' && route === 'claude/version') return ok({ version: await deps.claudeVersion?.() ?? null });
+        if (m === 'POST' && route === 'claude/open') return ok(await c.open(json ?? {}));
+        if (m === 'POST' && route === 'claude/rename') return ok(await c.rename(json?.id, json?.name));
+        if (m === 'POST' && route === 'claude/upload') return ok(await c.upload({ name: query.get('name'), cwd: query.get('cwd'), raw }));
+        if (m === 'DELETE' && segs[1] === 'sessions' && segs.length === 3) return ok(await c.remove(id));
+        if (m === 'GET' && segs[1] === 'export' && segs.length === 3) return ok(await c.exportChat(id));
+        if (m === 'GET' && segs[1] === 'search' && segs.length === 3) return ok(await c.search(id, query.get('q')));
+        if (segs[1] === 'chat' && id) {
+          const action = segs[3];
+          if (m === 'GET' && !action) return ok({ state: c.state(id) });
+          if (m === 'GET' && action === 'history') return ok(await c.history(id, { limit: query.get('limit'), before: query.get('before') }));
+          if (m === 'POST' && action === 'message') return ok(c.message(id, json?.text));
+          if (m === 'POST' && action === 'permission') return ok(c.answer(id, json?.requestId, json?.decision));
+          if (m === 'POST' && action === 'interrupt') return ok(c.interrupt(id));
+          if (m === 'POST' && action === 'settings') return ok(c.settings(id, json ?? {}));
+          if (m === 'POST' && (action === 'stop' || action === 'end')) return ok(c.end(id));
+        }
+      } catch (e) {
+        return err(e.status ?? 400, e.code ?? 'bad_request', e.message);
+      }
+      return err(404, 'not_found', 'Not available on this server.');
+    }
 
     /* #alerts */
     if (m === 'GET' && route === 'alerts/overview') return ok(await overview());

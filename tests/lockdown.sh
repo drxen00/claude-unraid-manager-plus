@@ -167,8 +167,11 @@ elif printf '%s' "$envs" | grep -q "$WRAITH_SECRET"; then
 else
   pass "Wraith code not in Claude's environment"
 fi
-# No Discord: nobody could answer Allow / Deny, so Claude gets no fix tools.
-if in_c 'jq -e ".mcpServers.fix" /etc/claude-code/managed-mcp.json' >/dev/null 2>&1; then fail "fix tools listed without Discord"; else pass "no fix tools without Discord"; fi
+# Wraith: Allow / Deny is answered in the Wraith chat, so the fix server is
+# listed, with the permission tool the Wraith chats use.
+if in_c 'jq -e ".mcpServers.fix.env.UNRAID_WRAITH_PERM == \"1\"" /etc/claude-code/managed-mcp.json' >/dev/null 2>&1; then pass "fix server listed for Wraith, with the permission tool"; else fail "fix server for Wraith: $(in_c 'jq -c .mcpServers.fix /etc/claude-code/managed-mcp.json')"; fi
+if in_c 'test -e /workspace/.unraid-watch/wraith-terminal-key'; then fail "terminal key made although the terminal is off"; else pass "no terminal key while the terminal is off"; fi
+if as_claude 'wraith-terminal-setup' >/dev/null 2>&1; then fail "wraith-terminal-setup works for Claude's user"; else pass "wraith-terminal-setup refuses Claude's user"; fi
 
 if [ "$FAIL" -ne 0 ]; then
   echo "lockdown: FAILED"

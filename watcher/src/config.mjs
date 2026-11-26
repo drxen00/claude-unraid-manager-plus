@@ -53,11 +53,16 @@ export function loadConfig(env = process.env) {
     .map((s) => s.trim())
     .filter(Boolean);
 
+  // The Wraith #terminal: a root shell on the host. Off unless asked for.
+  const terminal = String(env.WRAITH_TERMINAL ?? 'off').trim().toLowerCase() || 'off';
+  if (terminal !== 'off' && terminal !== 'host') throw new Error(`WRAITH_TERMINAL must be off or host, got "${terminal}"`);
+
   return {
     token,
     owner,
     discord: Boolean(token),
     wraith,
+    wraithTerminal: terminal === 'host' && Boolean(wraith),
     // The root-only socket `wraith-link` asks for a link code on.
     adminSocket: env.WATCH_ADMIN_SOCKET || '/run/unraid-watch-admin/admin.sock',
     reportTime,

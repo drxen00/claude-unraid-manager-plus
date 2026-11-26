@@ -81,7 +81,7 @@ icon). The container does not do this for you.
    server's LAN IP (the same setting the read-only checks use).
 
 4. Restart this container. The log then says:
-   unraid-watch: host fixes over SSH to <ip> (host-fix 1)
+   unraid-watch: host fixes over SSH to <ip> (host-fix 2)
 
    Test from Discord: ask "what host fixes can you do?", or tap Fix it on
    the next alert. Every change still waits for your Allow.
