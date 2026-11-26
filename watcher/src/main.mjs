@@ -11,7 +11,7 @@ import { access, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { ActionBook, CATALOG, describeOffer, validateSuggestions } from './actions.mjs';
 import { askClaude, chatPrompt, fixPrompt, incidentPrompt, morningPrompt } from './claude.mjs';
-import { collect } from './checks.mjs';
+import { collect, parseDockerPs } from './checks.mjs';
 import { loadConfig } from './config.mjs';
 import { approvalRow, startDiscord } from './discord.mjs';
 import { APPROVAL_MS, FixBroker, serveFixSocket } from './fix.mjs';
@@ -23,6 +23,9 @@ import {
 import { asClaude, run } from './run.mjs';
 import { pinStateDir } from './statedir.mjs';
 import { msUntil } from './schedule.mjs';
+import { AlertFeed, LinkCodes, createPanelApi } from './panel.mjs';
+import { SysSampler } from './sysinfo.mjs';
+import { serveAdminSocket, startWraith } from './wraith.mjs';
 
 const HELP = [
   'Talk to me normally, e.g. "why is plex slow?", "don\'t tell me about disk space until a disk hits 99%", "let me know when the parity check finishes", "snooze that till Friday". Rules apply right away and come with an Undo button.',
@@ -171,11 +174,23 @@ async function main() {
     while (history.length > HISTORY) history.shift();
   }
 
-  let bot;
+  // Without Discord (Wraith only) there is nobody to DM: messages are dropped.
+  let bot = { send: async () => null, typing() {} };
+  let discordUp = false;
   async function say(text, offers = []) {
     remember('bot', text);
     await bot.send(text, offers);
   }
+
+  // ── Wraith server panel (wraith.mjs, panel.mjs) ──
+  const wraithPath = join(stateDir, 'wraith.json');
+  const wraithState = await readJson(wraithPath, {});
+  let wraithLink = wraithState?.link && typeof wraithState.link.user === 'string' ? wraithState.link : null;
+  const saveWraith = (alertState) => writeJson(wraithPath, { link: wraithLink, alerts: alertState ?? alertFeed.state });
+  const alertFeed = new AlertFeed(wraithState?.alerts, { save: (s) => saveWraith(s) });
+  const linkCodes = new LinkCodes();
+  let wraith = null;
+  let wraithName = 'Unraid';
 
   const ctx = () => ({ prefs, history: [...history] });
 
@@ -275,6 +290,20 @@ async function main() {
       }
       const resolved = d.resolved.filter((i) => !mutedBy(prefs, i));
 
+      // Wraith's #alerts: every new and cleared problem the owner's rules
+      // let through, also during a report.
+      if (wraith) {
+        for (const [list, kind] of [[raised, 'raised'], [resolved, 'resolved']]) {
+          for (const i of list) {
+            const event = await alertFeed.record(i, kind);
+            wraith.emitEvent(wraithLink?.user, { type: 'alert.new', event });
+            if (alertFeed.notifies(event)) {
+              wraith.attention({ id: event.id, severity: event.severity, cat: event.cat, category: event.category, title: event.title, detail: event.detail, at: event.ts });
+            }
+          }
+        }
+      }
+
       // The owner's own alerts always go out, also during a report.
       for (const { rule, detail } of st.fired) {
         const more = rule.repeat ? ` I'll keep telling you; \`remove ${rule.id}\` to stop.` : '';
@@ -349,6 +378,11 @@ async function main() {
       return `✅ ${(await applyRule({ action: 'watch.mute', spec })).message}`;
     }
     if (word === 'note' && rest) return `✅ ${(await applyRule({ action: 'watch.note', spec: { text: rest } })).message}`;
+    if (word === 'wraith' && rest.toLowerCase() === 'link') {
+      if (!wraith) return 'Wraith is not set up: put a Wraith connection code in the template first.';
+      const { code } = linkCodes.issue();
+      return `🔗 Wraith link code: **${code}**\nOpen #system or #alerts in your Wraith space and type it into "Link your panel account". It works once, for 10 minutes.${wraithLink ? '\n_A Wraith account is linked already; linking again replaces it._' : ''}`;
+    }
     return null;
   }
 
@@ -374,6 +408,8 @@ async function main() {
   // One Allow/Deny question per change Claude asks for (fix.mjs).
   const approvals = new Map();
   async function askOwner({ what, reason, source }) {
+    // Allow / Deny lives in Discord for now; without it nobody can say yes.
+    if (!discordUp) return 'deny';
     const id = randomBytes(9).toString('base64url');
     const from = source ? ` (${source})` : '';
     const text = `🛠️ **Claude wants to ${what}**${from}${reason ? `\nWhy: ${reason}` : ''}\n_Nothing happens unless you tap Allow (within 15 minutes)._`;
@@ -428,16 +464,96 @@ async function main() {
     },
   });
 
-  bot = await startDiscord(cfg, {
-    onText,
-    onApproval,
-    onFix: async (id, who) => {
-      const r = await book.approve(id, who);
-      remember('bot', r.message);
-      return r;
-    },
-    onSkip: (ids) => book.withdraw(ids),
-  });
+  if (cfg.discord) {
+    const connectDiscord = () => startDiscord(cfg, {
+      onText,
+      onApproval,
+      onFix: async (id, who) => {
+        const r = await book.approve(id, who);
+        remember('bot', r.message);
+        return r;
+      },
+      onSkip: (ids) => book.withdraw(ids),
+    });
+    try {
+      bot = await connectDiscord();
+      discordUp = true;
+    } catch (err) {
+      // Discord alone: fail, and the entrypoint restarts us. With Wraith
+      // too, Wraith keeps working and Discord is tried again now and then.
+      if (!cfg.wraith) throw err;
+      console.error(`unraid-watch: Discord did not connect (${err.message}); Wraith keeps working, trying Discord again every 5 minutes`);
+      const retry = setInterval(async () => {
+        try {
+          bot = await connectDiscord();
+          discordUp = true;
+          clearInterval(retry);
+          console.log('unraid-watch: Discord connected');
+        } catch {
+          // Still not: next time.
+        }
+      }, 5 * 60_000);
+      retry.unref?.();
+    }
+  }
+
+  if (cfg.wraith) {
+    const sys = new SysSampler();
+    sys.start();
+    // The panel polls every few seconds: one docker ps serves them all.
+    let psCache = { at: 0, rows: [] };
+    const freshContainers = async () => {
+      if (Date.now() - psCache.at < 3000) return psCache.rows;
+      const ps = await run('docker', ['ps', '-a', '--format', '{{json .}}'], { timeoutMs: 20_000 });
+      psCache = { at: Date.now(), rows: ps.code === 0 ? parseDockerPs(ps.stdout) : containers };
+      return psCache.rows;
+    };
+    const api = createPanelApi({
+      link: () => wraithLink,
+      setLink: async (l) => {
+        // The old account's open views lock at once (sent while it is still
+        // the linked one: events only ever go to the linked account).
+        const was = wraithLink?.user;
+        if (was && was !== l?.user) wraith?.emitEvent(was, { type: 'locked' });
+        wraithLink = l;
+        await saveWraith();
+      },
+      codes: linkCodes,
+      linkHint: `On the Unraid server, open the terminal and run: docker exec -it claude-unraid-manager wraith-link${cfg.discord ? ' (or DM the watcher bot "wraith link")' : ''}. Then type the code it shows here.`,
+      hostname: () => wraithName,
+      sys,
+      disks: () => facts?.disks ?? null,
+      incidents: shownIncidents,
+      containers: freshContainers,
+      run,
+      act: async (action, name) => {
+        const id = book.offer({ action, target: name, reason: 'tapped in Wraith' });
+        const r = await book.approve(id, 'owner (Wraith)');
+        psCache.at = 0;
+        return r;
+      },
+      alerts: alertFeed,
+      test: async (event) => {
+        wraith?.emitEvent(wraithLink?.user, { type: 'alert.new', event });
+        wraith?.attention({ id: event.id, severity: event.severity, cat: event.cat, category: event.category, title: event.title, detail: event.detail, at: event.ts });
+      },
+      audit: (e) => book.audit(e),
+    });
+    wraith = startWraith({
+      url: cfg.wraith.url,
+      token: cfg.wraith.token,
+      api,
+      linkedUser: () => wraithLink?.user ?? null,
+      onName: (n) => { wraithName = n; },
+    });
+    try {
+      await mkdir(dirname(cfg.adminSocket), { recursive: true, mode: 0o700 });
+      await serveAdminSocket(cfg.adminSocket, { issueCode: () => linkCodes.issue(), linked: () => Boolean(wraithLink) });
+    } catch (err) {
+      console.error(`unraid-watch: cannot listen on ${cfg.adminSocket}: ${err.message}; wraith-link will not work (Discord "wraith link" still does)`);
+    }
+    console.log(`unraid-watch: Wraith server panel on (${cfg.wraith.url})${wraithLink ? '' : '; not linked yet: docker exec -it claude-unraid-manager wraith-link'}`);
+  }
 
   try {
     await mkdir(dirname(cfg.fixSocket), { recursive: true, mode: 0o750 });

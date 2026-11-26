@@ -12,11 +12,11 @@ CLAUDE_USER="${CLAUDE_USER:-claude}"
 CLAUDE_HOME="${CLAUDE_HOME:-/home/claude}"
 export HOST_HELPER_IMAGE="${HOST_HELPER_IMAGE:-alpine:3.21}"
 
-# Run a command as Claude's user. The Unraid API key and the Discord bot token
-# are dropped from the environment: the MCP server reads the key from a file,
-# and only the watcher (root) uses the token.
+# Run a command as Claude's user. The Unraid API key, the Discord bot token and
+# the Wraith connection code are dropped from the environment: the MCP server
+# reads the key from a file, and only the watcher (root) uses the others.
 as_claude() {
-  runuser -u "$CLAUDE_USER" -- env -u UNRAID_API_KEY -u DISCORD_BOT_TOKEN \
+  runuser -u "$CLAUDE_USER" -- env -u UNRAID_API_KEY -u DISCORD_BOT_TOKEN -u WRAITH_PANEL_CODE \
     HOME="$CLAUDE_HOME" USER="$CLAUDE_USER" LOGNAME="$CLAUDE_USER" "$@"
 }
 
@@ -184,8 +184,12 @@ fi
 # Claude's user) to explain problems, and sends everything to the owner's
 # Discord DM. Changes happen only through its buttons and the fix tools, each
 # after the owner's tap.
-if [ -n "${DISCORD_BOT_TOKEN:-}" ]; then
-  if [ "$DISCORD_OK" != true ]; then
+# The same watcher also serves the Wraith server panel (watcher/src/wraith.mjs)
+# when a Wraith connection code is set: Discord, Wraith, or both.
+WRAITH_ON=false
+if [ -n "${WRAITH_PANEL_CODE:-}" ]; then WRAITH_ON=true; fi
+if [ -n "${DISCORD_BOT_TOKEN:-}" ] || [ "$WRAITH_ON" = true ]; then
+  if [ -n "${DISCORD_BOT_TOKEN:-}" ] && [ "$DISCORD_OK" != true ]; then
     echo "Discord: bot token is set, but 'Discord user ID' is empty or not a number. Watcher not started."
   else
     mkdir -p /workspace/watch
@@ -198,26 +202,35 @@ if [ -n "${DISCORD_BOT_TOKEN:-}" ]; then
     mkdir -p "$FIX_SOCKET_DIR"
     chown root:"$(id -g "$CLAUDE_USER")" "$FIX_SOCKET_DIR"
     chmod 0750 "$FIX_SOCKET_DIR"
+    # wraith-link asks the watcher for a link code here: root only.
+    mkdir -p /run/unraid-watch-admin
+    chown root:root /run/unraid-watch-admin
+    chmod 0700 /run/unraid-watch-admin
     (
       if [ -n "${UNRAID_API_CA_BUNDLE:-}" ]; then export NODE_EXTRA_CA_CERTS="$UNRAID_API_CA_BUNDLE"; fi
       while true; do
         rc=0
         "$WATCH_DIR/node" "$WATCH_DIR/src/main.mjs" || rc=$?
         if [ "$rc" = 2 ]; then
-          echo "Discord watcher: configuration error (see above), not restarting."
+          echo "Watcher: configuration error (see above), not restarting."
           break
         fi
-        echo "Discord watcher stopped (exit $rc); restarting in 30 s."
+        echo "Watcher stopped (exit $rc); restarting in 30 s."
         sleep 30
       done
     ) &
-    echo "Discord: watcher running; reports go to your Discord DMs (morning report: ${REPORT_TIME:-08:00})."
+    if [ "$DISCORD_OK" = true ]; then
+      echo "Discord: watcher running; reports go to your Discord DMs (morning report: ${REPORT_TIME:-08:00})."
+    fi
+    if [ "$WRAITH_ON" = true ]; then
+      echo "Wraith: server panel on. Link your Wraith account once: docker exec -it $(hostname) wraith-link"
+    fi
     if [ -z "${UNRAID_SSH_HOST:-}" ]; then
       echo "Fixes: start/stop/restart work; updates and permission fixes need the host-fix setup: docker exec -it $(hostname) host-fix-setup"
     fi
   fi
 else
-  echo "Discord: not set up. Add a bot token and your Discord user ID in the template to get reports."
+  echo "Watcher: not set up. Add a Discord bot token and user ID, or a Wraith connection code, in the template to get reports."
 fi
 
 echo "Claude Unraid Manager is running (Claude as user $CLAUDE_USER, not root)."

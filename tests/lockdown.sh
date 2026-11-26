@@ -10,7 +10,9 @@
 #     only in the root-owned key file
 #   - home, workspace and CLAUDE.md belong to Claude's user
 #   - the Discord bot token is not in Claude's environment; the watcher starts
-# Needs Docker and jq. Creates and removes the container cum-lock only.
+#   - with only a Wraith connection code: the watcher starts, the code stays out
+#     of Claude's environment and the log, and wraith-link works for root only
+# Needs Docker and jq. Creates and removes the containers cum-lock and cum-lock-w only.
 set -uo pipefail
 
 IMAGE=${1:?usage: lockdown.sh <manager-image>}
@@ -21,7 +23,7 @@ DISCORD_SECRET=dummy-discord-token-9c1e
 FAIL=0
 pass() { echo "  ok   $1"; }
 fail() { echo "  FAIL $1"; FAIL=1; }
-cleanup() { docker rm -f "$C" >/dev/null 2>&1; }
+cleanup() { docker rm -f cum-lock cum-lock-w >/dev/null 2>&1; }
 trap cleanup EXIT
 cleanup
 
@@ -130,6 +132,43 @@ echo "lockdown: start log"
 log=$(docker logs "$C" 2>&1)
 if printf '%s' "$log" | grep -q 'Claude as user claude, not root'; then pass "start log names the user"; else fail "start log: $(printf '%s' "$log" | tail -5)"; fi
 if printf '%s' "$log" | grep -q "$SECRET"; then fail "key printed in the start log"; else pass "key not in the start log"; fi
+
+echo "lockdown: Wraith only"
+# A well-formed code for a Wraith that is not there: the watcher keeps retrying, harmlessly.
+WRAITH_SECRET="wpanel_$(printf '7%.0s' $(seq 64))"
+WRAITH_CODE="wpc1.$(printf 'https://127.0.0.1:9' | base64 | tr '+/' '-_' | tr -d '=').$WRAITH_SECRET"
+docker rm -f "$C" >/dev/null 2>&1
+C=cum-lock-w
+docker run -d --name "$C" -e WRAITH_PANEL_CODE="$WRAITH_CODE" -e REMOTE_CONTROL_NAME=off "$IMAGE" >/dev/null
+for _ in $(seq 60); do in_c 'test -S /run/unraid-watch-admin/admin.sock' 2>/dev/null && break; sleep 1; done
+log=$(docker logs "$C" 2>&1)
+if printf '%s' "$log" | grep -q 'Wraith server panel on'; then pass "watcher starts with only a Wraith code"; else fail "Wraith panel not started: $(printf '%s' "$log" | grep -iE 'wraith|watch' | tail -5)"; fi
+if printf '%s' "$log" | grep -q "$WRAITH_SECRET"; then fail "Wraith code printed in the log"; else pass "Wraith code not in the log"; fi
+if [ "$(owner /run/unraid-watch-admin)" = "root:root 700" ]; then pass "admin socket folder root-only 0700"; else fail "admin socket folder: $(owner /run/unraid-watch-admin)"; fi
+if in_c 'wraith-link' | grep -Eq 'Link code: +[A-Z2-9]{4}-[A-Z2-9]{4}'; then pass "wraith-link prints a code as root"; else fail "wraith-link as root: $(in_c 'wraith-link' 2>&1 | head -3)"; fi
+if as_claude 'wraith-link' >/dev/null 2>&1; then fail "wraith-link works for Claude's user"; else pass "wraith-link refuses Claude's user"; fi
+if as_claude "/usr/local/share/claude-unraid-manager/watcher/node -e 'require(\"net\").connect(\"/run/unraid-watch-admin/admin.sock\").on(\"connect\",()=>process.exit(0)).on(\"error\",()=>process.exit(1))'" >/dev/null 2>&1 \
+  || as_claude 'ls /run/unraid-watch-admin' >/dev/null 2>&1; then
+  fail "Claude's user can reach the admin socket"
+else
+  pass "admin socket out of Claude's reach"
+fi
+for _ in $(seq 60); do in_c 'pgrep -u 99 -x claude' >/dev/null 2>&1 && break; sleep 1; done
+pid=$(in_c 'pgrep -u 99 -x claude | head -1')
+envs=$(as_claude "tr '\\0' '\\n' < /proc/$pid/environ" 2>/dev/null)
+if [ -z "$envs" ]; then
+  pid=$(in_c "ps -o ppid= -p $pid | tr -d ' '")
+  envs=$(as_claude "tr '\\0' '\\n' < /proc/$pid/environ" 2>&1)
+fi
+if [ -z "$envs" ] || ! printf '%s\n' "$envs" | grep -q '^PATH='; then
+  fail "could not read Claude's environment (pid '$pid')"
+elif printf '%s' "$envs" | grep -q "$WRAITH_SECRET"; then
+  fail "Wraith code in Claude's environment"
+else
+  pass "Wraith code not in Claude's environment"
+fi
+# No Discord: nobody could answer Allow / Deny, so Claude gets no fix tools.
+if in_c 'jq -e ".mcpServers.fix" /etc/claude-code/managed-mcp.json' >/dev/null 2>&1; then fail "fix tools listed without Discord"; else pass "no fix tools without Discord"; fi
 
 if [ "$FAIL" -ne 0 ]; then
   echo "lockdown: FAILED"

@@ -33,7 +33,7 @@ export function run(cmd, args, { input, timeoutMs = 60_000, env, cwd } = {}) {
 export function asClaude(cfg, args, opts = {}) {
   return run('runuser', [
     '-u', cfg.claudeUser, '--',
-    'env', '-u', 'UNRAID_API_KEY', '-u', 'DISCORD_BOT_TOKEN',
+    'env', '-u', 'UNRAID_API_KEY', '-u', 'DISCORD_BOT_TOKEN', '-u', 'WRAITH_PANEL_CODE',
     `HOME=${cfg.claudeHome}`, `USER=${cfg.claudeUser}`, `LOGNAME=${cfg.claudeUser}`,
     ...args,
   ], opts);

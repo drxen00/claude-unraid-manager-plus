@@ -1,0 +1,6 @@
+#!/bin/bash
+# wraith-link: show a one-time code that links your Wraith account to this
+# server's panel (docs/wraith.md). Run as root:
+#   docker exec -it claude-unraid-manager wraith-link
+set -euo pipefail
+exec /usr/local/share/claude-unraid-manager/watcher/node /usr/local/share/claude-unraid-manager/watcher/src/link-cli.mjs "$@"

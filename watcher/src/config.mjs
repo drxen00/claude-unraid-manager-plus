@@ -13,11 +13,33 @@ function int(value, fallback, min, max, name) {
   return n;
 }
 
+// The code from Wraith → Space settings → Server panel:
+// wpc1.<Wraith's address, base64url>.wpanel_<64 hex>
+export function parseWraithCode(raw) {
+  const code = String(raw ?? '').trim();
+  if (!code) return null;
+  const m = /^wpc1\.([A-Za-z0-9_-]+)\.(wpanel_[0-9a-f]{64})$/.exec(code);
+  if (!m) throw new Error('WRAITH_PANEL_CODE is not a Wraith connection code (Space settings, Server panel, Make a connection code; copy all of it)');
+  let url;
+  try {
+    url = new URL(Buffer.from(m[1], 'base64url').toString('utf8'));
+  } catch {
+    throw new Error('WRAITH_PANEL_CODE has a broken address in it; make a new code in Wraith');
+  }
+  const local = url.hostname === 'localhost' || url.hostname === '127.0.0.1';
+  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && local)) {
+    throw new Error(`WRAITH_PANEL_CODE points at ${url.origin}, which is not https`);
+  }
+  return { url: url.origin, token: m[2] };
+}
+
 export function loadConfig(env = process.env) {
   const token = (env.DISCORD_BOT_TOKEN ?? '').trim();
   const owner = (env.DISCORD_USER_ID ?? '').trim();
-  if (!token) throw new Error('DISCORD_BOT_TOKEN is not set');
-  if (!SNOWFLAKE.test(owner)) {
+  const wraith = parseWraithCode(env.WRAITH_PANEL_CODE);
+  // At least one place to report to: Discord, Wraith, or both.
+  if (!token && !wraith) throw new Error('neither DISCORD_BOT_TOKEN nor WRAITH_PANEL_CODE is set');
+  if (token && !SNOWFLAKE.test(owner)) {
     throw new Error('DISCORD_USER_ID must be your numeric Discord user ID (Developer Mode, right-click your name, Copy User ID)');
   }
 
@@ -34,6 +56,10 @@ export function loadConfig(env = process.env) {
   return {
     token,
     owner,
+    discord: Boolean(token),
+    wraith,
+    // The root-only socket `wraith-link` asks for a link code on.
+    adminSocket: env.WATCH_ADMIN_SOCKET || '/run/unraid-watch-admin/admin.sock',
     reportTime,
     intervalMinutes: int(env.CHECK_INTERVAL, 15, 5, 240, 'CHECK_INTERVAL'),
     diskWarnPercent: int(env.DISK_WARN_PERCENT, 90, 50, 99, 'DISK_WARN_PERCENT'),
