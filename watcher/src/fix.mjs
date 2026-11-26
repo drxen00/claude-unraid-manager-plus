@@ -10,6 +10,7 @@ import { createHash } from 'node:crypto';
 import { createServer } from 'node:net';
 import { chmod, chown, unlink } from 'node:fs/promises';
 import { OWN_CONTAINERS } from './checks.mjs';
+import { describeOffer, validateSuggestions } from './actions.mjs';
 
 const NAME = /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/;
 const OWNER = /^\d{1,5}:\d{1,5}$/;
@@ -239,6 +240,53 @@ FIX_TOOLS.appdata_edit = {
   },
 };
 
+// The watcher's own rules (mute, alert when, notes), so the owner can set them
+// by talking to Claude in Wraith the way they can in Discord. Reading needs no
+// question; a change is asked like any fix, since a mute hides problems.
+FIX_TOOLS.watch_status = {
+  description:
+    "The watcher's current view: open problems (and how many are muted), and the owner's rules (mutes, alerts, notes) with their ids. Read-only, no question to the owner. Use it before answering \"what's wrong?\" or changing a rule.",
+  inputSchema: { type: 'object', properties: {} },
+  noAsk: true,
+  check: () => ({ args: {} }),
+  what: () => 'read the watcher status',
+  async exec(_a, { rules }) {
+    if (!rules) return { ok: false, text: 'The watcher has no rules here.' };
+    return { ok: true, text: rules.status() };
+  },
+};
+
+FIX_TOOLS.watch_rule = {
+  description: `Change the watcher's rules for the owner, when they ask in their own words ("don't tell me about disk space until a disk hits 99%", "let me know when plex is back up", "remember the array has no parity"). The owner sees the exact rule and taps Allow. action is one of:
+- "mute": { match: "<pattern, * wildcards, matched against problem ids like disk:disk1:full or container:plex:exited, or a word>", until?: "<ISO time>", days?: <1-365>, until_when?: <condition> }
+- "alert": { when: <condition>, message?: "<what to say>", repeat?: true, expires?: "<ISO time>" }
+- "note": { text: "<a standing instruction for every report>" }
+- "remove": { ids: ["m1", "a2"] } (ids from watch_status)
+Conditions: {"type":"disk","disk":"disk1" or "*","op":">=" or "<=","percent":99} · {"type":"container","name":"plex","state":"running|stopped|restarting|unhealthy|healthy|gone"} · {"type":"problem","match":"<pattern>","is":"open|cleared"} · {"type":"notification","match":"*parity*"} · {"type":"array","is":"started|stopped|syncing|not syncing"} · {"type":"time","at":"<ISO time>"}. Array problems cannot be muted.`,
+  inputSchema: {
+    type: 'object',
+    properties: {
+      action: { type: 'string', enum: ['mute', 'alert', 'note', 'remove'] },
+      match: { type: 'string' }, until: { type: 'string' }, days: { type: 'number' }, until_when: { type: 'object' },
+      when: { type: 'object' }, message: { type: 'string' }, repeat: { type: 'boolean' }, expires: { type: 'string' },
+      text: { type: 'string' }, ids: { type: 'array', items: { type: 'string' } },
+      reason: reasonArg,
+    },
+    required: ['action', 'reason'],
+  },
+  check(args, { containers }) {
+    const action = `watch.${String(args.action ?? '')}`;
+    const [item] = validateSuggestions([{ ...args, action }], containers);
+    if (!item) return { error: 'That rule is not valid: check the action, the pattern and the condition (see the tool description). Nothing was changed.' };
+    return { args: { name: undefined, rule: item } };
+  },
+  what: (a) => `set a watcher rule: ${describeOffer(a.rule).replace(/\*\*/g, '')}`,
+  async exec(a, { rules }) {
+    if (!rules) return { ok: false, text: 'The watcher has no rules here.' };
+    return { ok: true, text: await rules.apply(a.rule) };
+  },
+};
+
 export const FIX_HELP =
   'Changes go through these tools only. Every call is shown to the owner in Discord with Allow and Deny and waits for their tap (up to 15 minutes), so give a clear reason, change one thing at a time, and check the result afterwards.';
 
@@ -251,8 +299,8 @@ export const FIX_HELP =
 export class FixBroker {
   // permission(origin, args): the Wraith chat's --permission-prompt-tool, answered
   // by the owner in that chat (claudechat.mjs). Not a fix: no limits apply.
-  constructor({ askOwner, run, hostFix, audit, containers = () => [], policy = () => ({ source: '' }), now = () => Date.now(), notify = async () => {}, permission = null }) {
-    Object.assign(this, { askOwner, run, hostFix, audit, containers, policy, now, notify, permission });
+  constructor({ askOwner, run, hostFix, audit, containers = () => [], policy = () => ({ source: '' }), now = () => Date.now(), notify = async () => {}, permission = null, rules = null }) {
+    Object.assign(this, { askOwner, run, hostFix, audit, containers, policy, now, notify, permission, rules });
     this.done = [];
     this.asked = [];
     this.waiting = false;
@@ -276,6 +324,8 @@ export class FixBroker {
     }
     const c = tool.check(req.args ?? {}, { containers: this.containers() });
     if (c.error) return { ok: false, text: c.error };
+    // Reading (watch_status): no question, no limits.
+    if (tool.noAsk) return tool.exec(c.args, { run: this.run, hostFix: this.hostFix, rules: this.rules });
     const hourAgo = this.now() - 3_600_000;
     this.done = this.done.filter((t) => t > hourAgo);
     if (this.done.length >= MAX_FIXES_PER_HOUR) return { ok: false, text: `Limit reached: at most ${MAX_FIXES_PER_HOUR} changes an hour. Nothing was changed.` };
@@ -310,7 +360,7 @@ export class FixBroker {
     }
     // Long texts (a command, an edit) are cut for the log; the change itself is not.
     const logged = Object.fromEntries(Object.entries(c.args).map(([k, v]) => [k, typeof v === 'string' && v.length > 300 ? `${v.slice(0, 300)}…` : v]));
-    const entry = { action: `fix.${name}`, target: c.args.name ?? c.args.path, args: logged, reason };
+    const entry = { action: `fix.${name}`, target: c.args.name ?? c.args.path ?? c.args.rule?.target, args: logged, reason };
     if (decision !== 'allow') {
       await this.audit({ who: 'owner', ...entry, result: { deny: 'denied', error: 'not asked (Discord error)' }[decision] ?? 'no answer' });
       if (decision === 'deny') return { ok: false, text: 'The owner tapped Deny. Nothing was changed. Do not ask for the same change again; explain other options instead.' };
@@ -320,7 +370,7 @@ export class FixBroker {
     this.done.push(this.now());
     let r;
     try {
-      r = await tool.exec(args, { run: this.run, hostFix: this.hostFix });
+      r = await tool.exec(args, { run: this.run, hostFix: this.hostFix, rules: this.rules });
     } catch (err) {
       r = { ok: false, text: String(err.message ?? err) };
     }

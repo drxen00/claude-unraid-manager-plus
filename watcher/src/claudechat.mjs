@@ -121,6 +121,8 @@ export class ClaudeChats {
     this.live = new Map();
     this.pending = new Map();
     this.cache = new Map();
+    this.done = new Map();
+    this.inboxId = null;
   }
 
   get projects() { return join(this.d.home, '.claude', 'projects'); }
@@ -173,15 +175,16 @@ export class ClaudeChats {
     // Chats started here that Claude has not written to disk yet.
     for (const c of this.live.values()) {
       if (!list.some((s) => s.id === c.id)) {
-        list.push({ id: c.id, cwd: c.cwd, name: names[c.id] ?? null, title: 'New chat', model: family(c.model), version: '', permission: c.permissionMode, ctx: 0, mtime: Date.now(), live: true });
+        list.push({ id: c.id, cwd: c.cwd, name: names[c.id] ?? null, title: c.title ?? 'New chat', model: family(c.model), version: '', permission: c.permissionMode, ctx: 0, mtime: Date.now(), live: true });
       }
     }
     return list.sort((a, b) => b.mtime - a.mtime);
   }
 
   async history(id, { limit = 200, before = null } = {}) {
-    const f = await this.#find(id);
-    const t = f ? await this.#read(f) : { items: [] };
+    const v = this.live.get(id);
+    const f = v?.virtual ? null : await this.#find(id);
+    const t = v?.virtual ? { items: v.items } : f ? await this.#read(f) : { items: [] };
     if (!f && !this.live.has(id)) throw Object.assign(new Error('No such chat.'), { status: 404, code: 'not_found' });
     const total = t.items.length;
     const end = before === null || before === undefined || before === '' ? total : Math.max(0, Math.min(total, Number(before) || 0));
@@ -225,6 +228,7 @@ export class ClaudeChats {
   }
 
   async remove(id) {
+    if (id === this.inboxId) throw Object.assign(new Error('The Approvals list cannot be deleted.'), { status: 400, code: 'inbox' });
     const f = await this.#find(id);
     if (this.live.has(id)) this.end(id, 'deleted');
     if (f) await this.d.fs.unlink(f.path);
@@ -280,7 +284,7 @@ export class ClaudeChats {
     const resume = body.resume ? String(body.resume) : null;
     if (resume && !body.fork && this.live.has(resume)) return this.state(resume);
     if (resume && !(await this.#find(resume))) throw Object.assign(new Error('No such chat.'), { status: 404, code: 'not_found' });
-    if (this.live.size >= MAX_LIVE) throw Object.assign(new Error(`At most ${MAX_LIVE} chats can run at once. End one first.`), { status: 409, code: 'too_many' });
+    if ([...this.live.values()].filter((x) => !x.virtual).length >= MAX_LIVE) throw Object.assign(new Error(`At most ${MAX_LIVE} chats can run at once. End one first.`), { status: 409, code: 'too_many' });
     const model = String(body.model ?? '');
     if (!MODEL.test(model)) throw Object.assign(new Error('Unknown model.'), { status: 400, code: 'bad_model' });
     const effort = body.effort ? String(body.effort) : '';
@@ -386,12 +390,19 @@ export class ClaudeChats {
       const ok = !e.is_error && (e.subtype === 'success' || e.subtype === undefined);
       this.#emit(c, { type: 'claude.result', ok, costUsd: e.total_cost_usd ?? null, durationMs: e.duration_ms ?? null, error: ok ? null : String(e.result ?? e.subtype ?? 'error').slice(0, 300) });
       this.#status(c, 'idle');
+      const hook = this.done.get(c.id);
+      if (hook) {
+        this.done.delete(c.id);
+        Promise.resolve(hook({ ok, text: typeof e.result === 'string' ? e.result : '' })).catch(() => {});
+        return; // the hook tells the owner itself
+      }
       this.d.notify({ type: 'claude.attention', session: c.id, reason: 'done', title: this.d.names()[c.id] ?? 'Claude chat', detail: ok ? 'Claude finished' : 'Claude stopped with an error' });
     }
   }
 
   message(id, text) {
     const c = this.live.get(id);
+    if (c?.virtual) throw Object.assign(new Error('This is your Approvals list: questions from outside a Wraith chat land here. Start a new chat to talk to Claude.'), { status: 409, code: 'inbox' });
     if (!c?.child) throw Object.assign(new Error('That chat is not running. Open it again.'), { status: 409, code: 'not_running' });
     const t = String(text ?? '');
     if (!t.trim()) throw Object.assign(new Error('Type a message.'), { status: 400, code: 'empty' });
@@ -400,6 +411,11 @@ export class ClaudeChats {
     this.#emit(c, { type: 'claude.item', item: { id: `u-${randomBytes(6).toString('hex')}`, role: 'user', text: t, ts: Date.now() } });
     this.#status(c, 'working');
     return { ok: true };
+  }
+
+  /** fn({ ok, text }) once, when this chat's current turn ends. */
+  whenDone(id, fn) {
+    this.done.set(id, fn);
   }
 
   interrupt(id) {
@@ -411,7 +427,7 @@ export class ClaudeChats {
 
   end(id, reason = 'ended') {
     const c = this.live.get(id);
-    if (!c) return { ok: true };
+    if (!c || c.virtual) return { ok: true };
     const child = c.child;
     this.#closed(c, reason);
     if (child) this.d.signal(child, 'SIGTERM');
@@ -421,6 +437,7 @@ export class ClaudeChats {
   /** Model, effort or mode: Claude restarts on the same chat with the new choice. */
   settings(id, patch = {}) {
     const c = this.live.get(id);
+    if (c?.virtual) throw Object.assign(new Error('This is your Approvals list, not a chat.'), { status: 409, code: 'inbox' });
     if (!c) throw Object.assign(new Error('That chat is not running.'), { status: 409, code: 'not_running' });
     if (c.status !== 'idle') throw Object.assign(new Error('Wait until Claude has finished, then change it.'), { status: 409, code: 'busy' });
     if (patch.model !== undefined) {
@@ -446,10 +463,26 @@ export class ClaudeChats {
 
   // ── Questions to the owner ──
 
+  /**
+   * The Approvals list: a chat-shaped list in the Claude channel for
+   * questions that come from outside a Wraith chat (the Claude app, the
+   * watcher's own runs). No Claude runs behind it.
+   */
+  inbox() {
+    let c = this.inboxId && this.live.get(this.inboxId);
+    if (!c) {
+      const id = randomUUID();
+      c = { id, cwd: this.d.workspace, model: '', modelId: '', effort: '', permissionMode: 'default', status: 'idle', pending: new Set(), child: null, stderr: '', virtual: true, title: 'Approvals', items: [] };
+      this.live.set(id, c);
+      this.inboxId = id;
+    }
+    return c;
+  }
+
   /** The chat a question belongs to: the one named, else the only one working. */
   chatFor(origin) {
     if (origin && this.live.has(origin)) return this.live.get(origin);
-    const working = [...this.live.values()].filter((c) => c.status === 'working' || c.status === 'waiting');
+    const working = [...this.live.values()].filter((c) => !c.virtual && (c.status === 'working' || c.status === 'waiting'));
     return working.length === 1 ? working[0] : null;
   }
 
@@ -457,9 +490,16 @@ export class ClaudeChats {
    * Ask the owner in the chat. Resolves 'allow' | 'deny' | 'timeout', or
    * null when there is no chat to ask in.
    */
-  ask(origin, { tool, summary }) {
-    const c = this.chatFor(origin);
+  ask(origin, { tool, summary, inbox = false }) {
+    const c = this.chatFor(origin) ?? (inbox ? this.inbox() : null);
     if (!c) return null;
+    if (c.virtual) {
+      // The list keeps what was asked, so it can be read later.
+      const item = { id: `q-${randomBytes(6).toString('hex')}`, role: 'assistant', text: `**${tool}**\n\n${summary}`, ts: Date.now() };
+      c.items.push(item);
+      while (c.items.length > 200) c.items.shift();
+      this.#emit(c, { type: 'claude.item', item });
+    }
     const requestId = randomBytes(9).toString('hex');
     c.pending.add(requestId);
     return new Promise((resolve) => {
@@ -479,7 +519,7 @@ export class ClaudeChats {
     clearTimeout(p.timer);
     p.chat.pending.delete(requestId);
     this.#emit(p.chat, { type: 'claude.permissionResolved', requestId });
-    if (!p.chat.pending.size && p.chat.status === 'waiting') this.#status(p.chat, 'working');
+    if (!p.chat.pending.size && p.chat.status === 'waiting') this.#status(p.chat, p.chat.virtual ? 'idle' : 'working');
     p.resolve(decision);
     return true;
   }

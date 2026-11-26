@@ -197,6 +197,23 @@ step by step. Finish with a short report: what was wrong, what you changed,
 whether it works now (check again), and anything left for the owner.`;
 }
 
+/**
+ * The first message of a Wraith chat the watcher opens for new problems.
+ * That chat is an ordinary Claude Code chat (the owner can read along and
+ * answer), so this is plain instructions, without the report JSON format.
+ */
+export function investigatePrompt(problems, prefs) {
+  return `The watcher on this Unraid server just found ${problems.length === 1 ? 'a new problem' : 'new problems'}. I'm the owner; I'll read this chat in Wraith.${context({ prefs })}
+
+Problems (data from the watcher's checks):
+${JSON.stringify(problems.map(brief), null, 1)}
+
+Please look into ${problems.length === 1 ? 'it' : 'them'} now: the container's logs and docker inspect, its config under /appdata if that is mounted, the read-only host checks (host help). Find the cause.
+- Do not change anything just to try something. If one clear fix would solve it, ask for it with the fix tools; I approve each one here in the chat.
+- Never touch the array, disks or parity.
+- Finish with a short summary in plain English, a few lines: what is wrong, why, what you did or what you recommend, and whether it needs me.`;
+}
+
 function brief(i) {
   return { id: i.key, problem: i.title, severity: i.severity, detail: i.detail, since: new Date(i.firstSeen).toISOString() };
 }

@@ -29,6 +29,8 @@ import { SysSampler } from './sysinfo.mjs';
 import { serveAdminSocket, startWraith } from './wraith.mjs';
 import { HostTerminal } from './terminal.mjs';
 import { ClaudeChats } from './claudechat.mjs';
+import { UptimeMonitor } from './uptime.mjs';
+import { investigatePrompt } from './claude.mjs';
 import { spawn } from 'node:child_process';
 
 const HELP = [
@@ -190,12 +192,15 @@ async function main() {
   const wraithPath = join(stateDir, 'wraith.json');
   const wraithState = (await readJson(wraithPath, {})) ?? {};
   let wraithLink = wraithState?.link && typeof wraithState.link.user === 'string' ? wraithState.link : null;
-  const saveWraith = (alertState) => writeJson(wraithPath, { link: wraithLink, alerts: alertState ?? alertFeed.state, chatNames: wraithState?.chatNames ?? {} });
+  const saveWraith = (alertState) => writeJson(wraithPath, {
+    link: wraithLink, alerts: alertState ?? alertFeed.state, chatNames: wraithState.chatNames ?? {}, uptime: wraithState.uptime ?? [],
+  });
   const alertFeed = new AlertFeed(wraithState?.alerts, { save: (s) => saveWraith(s) });
   const linkCodes = new LinkCodes();
   let wraith = null;
   let wraithName = 'Unraid';
   let chats = null;
+  let uptime = null;
 
   const ctx = () => ({ prefs, history: [...history] });
 
@@ -271,13 +276,18 @@ async function main() {
   }
 
   let checking = false;
+  // A check asked for while one runs (a site went down) runs right after it.
+  let checkAgain = false;
   async function check({ quiet = false } = {}) {
-    if (checking) return { raised: [], resolved: [] };
+    if (checking) {
+      checkAgain = true;
+      return { raised: [], resolved: [] };
+    }
     checking = true;
     try {
       const res = await collect(cfg, { run, asClaude });
       containers = res.containers.length ? res.containers : containers;
-      const findings = [...res.findings, ...failureFindings(res.failed)];
+      const findings = [...res.findings, ...failureFindings(res.failed), ...(uptime ? uptime.findings() : [])];
       const d = diff(state, findings, res.failed);
       state = d.state;
       await saveState();
@@ -325,7 +335,9 @@ async function main() {
         if (resolved.length) {
           await say(`✅ **Cleared:**\n${resolved.map((i) => `• ${i.title}`).join('\n')}`);
         }
-        if (raised.length) {
+        if (raised.length && (await investigate(raised))) {
+          await say(`${plainList(raised)}\n\n_Claude is looking into this in your Wraith Claude channel._`);
+        } else if (raised.length) {
           withClaude(async () => {
             const r = await ask(incidentPrompt(raised, shownIncidents(), ctx()));
             if (r.ok) {
@@ -340,6 +352,44 @@ async function main() {
       return { raised, resolved };
     } finally {
       checking = false;
+      if (checkAgain) {
+        checkAgain = false;
+        setTimeout(() => check().catch((err) => console.error(`unraid-watch: check failed: ${err.stack ?? err}`)), 1000);
+      }
+    }
+  }
+
+  /** A report-style entry in Wraith's #alerts, with a push. */
+  async function postReport(title, text) {
+    if (!wraith) return;
+    const event = await alertFeed.record({ source: 'report', severity: 'info', title, detail: text.replace(/\*\*/g, '') }, 'report');
+    wraith.emitEvent(wraithLink?.user, { type: 'alert.new', event });
+    if (alertFeed.notifies(event)) wraith.attention({ id: event.id, severity: event.severity, cat: event.cat, category: event.category, title: event.title, detail: (event.detail ?? '').slice(0, 300), at: event.ts });
+  }
+
+  // New problems: one Claude chat in Wraith per batch, to find the cause and
+  // say what to do. It changes nothing without the owner's Allow in that
+  // chat. At most a few an hour, so a flapping server cannot run up a bill.
+  const investigations = [];
+  async function investigate(problems) {
+    if (!chats || !wraithLink) return false;
+    const hourAgo = Date.now() - 3_600_000;
+    while (investigations.length && investigations[0] < hourAgo) investigations.shift();
+    if (investigations.length >= 6) return false;
+    const title = `${problems[0].title}${problems.length > 1 ? ` (+${problems.length - 1} more)` : ''}`.slice(0, 70);
+    try {
+      const st = await chats.open({ permissionMode: 'default' });
+      investigations.push(Date.now());
+      await chats.rename(st.sessionId, `Looking into: ${title}`);
+      chats.whenDone(st.sessionId, async ({ ok, text }) => {
+        await postReport(`Claude looked into: ${title}`, ok && text ? text : 'Claude could not finish looking into it. Open the Claude channel to see how far it got.');
+        chats.end(st.sessionId, 'finished');
+      });
+      chats.message(st.sessionId, investigatePrompt(problems, prefs));
+      return true;
+    } catch (err) {
+      console.error(`unraid-watch: could not start a Wraith investigation: ${err.message}`);
+      return false;
     }
   }
 
@@ -349,6 +399,7 @@ async function main() {
       const r = await ask(morningPrompt(shownIncidents(), ctx()));
       if (r.ok) await respond(`☀️ **Server report**\n${r.text}`, r.actions);
       else await say(`☀️ **Server report** (without Claude: ${r.error})\n${statusText()}`);
+      await postReport('Morning report', r.ok ? r.text : `Claude could not write it (${r.error}). Open problems:\n${statusText()}`);
     });
   }
 
@@ -413,12 +464,14 @@ async function main() {
   // One Allow/Deny question per change Claude asks for (fix.mjs).
   const approvals = new Map();
   async function askOwner({ what, detail, reason, source, origin }) {
-    // A Wraith chat is working on this: ask there (claudechat.mjs).
-    if (chats?.chatFor(origin)) {
+    // Wraith first: the chat this came from, else the Approvals list in the
+    // Claude channel (claudechat.mjs); Discord only without Wraith.
+    if (chats && (chats.chatFor(origin) || wraithLink)) {
       const summary = `${what.replace(/**/g, '')}${source ? ` (${source})` : ''}${detail ? `
 ${detail.replace(/**/g, '')}` : ''}${reason ? `
 Why: ${reason}` : ''}`;
-      const d = await chats.ask(origin, { tool: 'Claude wants to change something', summary });
+      const asked = chats.ask(origin, { tool: 'Claude wants to change something', summary, inbox: Boolean(wraithLink) });
+      const d = asked && (await asked);
       if (d) return d;
     }
     // Otherwise Discord; without it nobody can say yes.
@@ -477,6 +530,14 @@ Why: ${reason}` : ''}`;
     containers: () => containers,
     notify: (text) => say(text),
     permission: (origin, args) => (chats ? chats.permission(origin, args) : { behavior: 'deny', message: 'Wraith is not set up.' }),
+    rules: {
+      status: () => {
+        const { shown, muted } = partition(prefs, openIncidents(state));
+        const problems = shown.length ? shown.map((i) => `- [${i.severity}] ${i.title} (id ${i.key})${i.detail ? `: ${i.detail}` : ''}`).join('\n') : 'No open problems.';
+        return `Open problems:\n${problems}${muted.length ? `\n(${muted.length} more muted)` : ''}\n\nRules:\n${listRules(prefs)}`;
+      },
+      apply: async (item) => (await applyRule(item)).message,
+    },
     policy: () => {
       if (activeMode === 'report') return { refuse: 'Fix tools are not used during reports and alerts. Say what you would change; the owner can tap Fix it.' };
       return { source: activeMode === 'chat' ? 'you asked in this chat' : activeMode === 'fix' ? 'Fix it' : 'from your Claude app session' };
@@ -584,9 +645,17 @@ Why: ${reason}` : ''}`;
       saveNames: async (n) => { wraithState.chatNames = n; await saveWraith(); },
     });
 
+    uptime = new UptimeMonitor({
+      saved: wraithState.uptime ?? [],
+      save: async (list) => { wraithState.uptime = list; await saveWraith(); },
+      onChange: () => { check().catch((err) => console.error(`unraid-watch: check failed: ${err.stack ?? err}`)); },
+    });
+    uptime.start();
+
     const api = createPanelApi({
       terminal,
       terminalHint,
+      uptime,
       claude: chats,
       claudeVersion: async () => {
         if (claudeVersion === undefined) {

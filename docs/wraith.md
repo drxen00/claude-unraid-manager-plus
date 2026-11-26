@@ -13,7 +13,8 @@ one of your Wraith spaces shows your Unraid server:
   if you want one. In #alerts you choose which kinds reach your phone, and you
   can mute them for a while.
 
-It runs next to the Discord bot ([discord.md](discord.md)) or on its own.
+It runs next to the Discord bot ([discord.md](discord.md)) or on its own:
+Wraith alone does everything Discord does (see "Without Discord" below).
 
 **Nothing on your server is opened up.** Your server dials out to Wraith,
 the way your browser does, so there is no port forwarding, tunnel or
@@ -58,6 +59,68 @@ That's it. The container's log says
 Only the one Wraith account you linked can use it. Anyone else in the space
 sees "Link your panel account" and nothing else, and linking needs a code
 from your server's terminal.
+
+## What happens when something breaks
+
+1. The watcher finds a problem (every 15 minutes, or within about two
+   minutes for a website that stops answering).
+2. #alerts gets the alert, and your phone gets a push.
+3. Claude opens a chat in the Claude channel, called "Looking into: …",
+   and investigates: logs, settings, the read-only host checks.
+4. When it's done, #alerts gets a second entry, "Claude looked into: …",
+   with what's wrong, why, and what it recommends. Your phone gets a push.
+5. If one clear fix would solve it, Claude asks for it in that chat with
+   Allow / Deny. **Nothing changes unless you tap Allow.**
+
+At most 6 of these an hour, so a server having a bad day can't run up your
+Claude usage. Above that you still get the alerts, just without Claude.
+
+## The morning report
+
+At the time set in **Morning report time** in the template, Claude checks the
+server and writes the report. It lands in #alerts as "Morning report", with a
+push. `off` turns it off. You can also ask in the Claude channel at any
+time: "give me a status report".
+
+## Website checks
+
+#alerts → **Uptime monitors** → add a name and an address (`http://` or
+`https://`). The server checks it every minute.
+- A site that doesn't answer, or answers with a server error (5xx), twice in
+  a row counts as **down**: it's an alert like any other, and Claude looks
+  into it.
+- HTTPS sites also get their certificate checked. You get a warning two
+  weeks before it expires, and a critical alert in the last few days.
+- Up to 25 sites. Turn alerts off for a site and it's still checked and
+  shown, just quietly.
+
+## Talking to the watcher in the Claude channel
+
+What you told the Discord bot, you can tell Claude in Wraith:
+- "Don't tell me about disk space until a disk hits 99%"
+- "Let me know when plex is back up"
+- "Remember the array has no parity on purpose"
+- "What rules do I have?" / "Forget the plex one"
+
+Claude shows you the exact rule and you tap **Allow**, because a mute hides
+problems. "What's wrong right now?" needs no tap: Claude reads the watcher's
+open problems.
+
+## Approvals
+
+Every change Claude wants is asked in Wraith:
+- **From a Wraith chat:** in that chat.
+- **From anywhere else** (the Claude app, the watcher's own runs): in a list
+  called **Approvals** at the top of the Claude channel. It shows what was
+  asked, with Allow / Deny, and you get a push.
+
+Discord is only asked when Wraith is not set up.
+
+## Without Discord
+
+Empty **Discord bot token** and **Discord user ID** in the template and apply.
+Everything above keeps working through Wraith alone. Keep **Remote Control**
+on in the Claude app as a backup way in for when Wraith is down.
 
 ## Claude
 

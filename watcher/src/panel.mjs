@@ -63,7 +63,7 @@ export class LinkCodes {
 
 /* ── Alerts: the feed #alerts shows, and who gets told ─────────────────── */
 
-const SEVERITY = { critical: 'error', warning: 'warn' };
+const SEVERITY = { critical: 'error', warning: 'warn', info: 'info' };
 const SEV_RANK = { info: 0, ok: 0, warn: 1, error: 2 };
 const COLOR = { error: '#e5484d', warn: '#f5a524', ok: '#30a46c', info: '#8b8d98' };
 export const CATEGORIES = [
@@ -71,6 +71,8 @@ export const CATEGORIES = [
   { key: 'disks', label: 'Disks', hint: 'A disk or pool is getting full' },
   { key: 'array', label: 'Array', hint: 'The array stopped or a disk is disabled' },
   { key: 'notifications', label: 'Unraid', hint: "Unraid's own warnings and alerts" },
+  { key: 'uptime', label: 'Websites', hint: 'A site you monitor is down, or its certificate runs out' },
+  { key: 'report', label: 'Reports', hint: 'The morning report and what Claude found' },
   { key: 'watcher', label: 'Watcher', hint: 'The watcher could not check something' },
 ];
 const CAT_LABEL = Object.fromEntries(CATEGORIES.map((c) => [c.key, c.label]));
@@ -108,7 +110,8 @@ export class AlertFeed {
       cat,
       category: CAT_LABEL[cat] ?? 'Watcher',
       title: kind === 'resolved' ? `Cleared: ${incident.title}` : String(incident.title ?? 'Problem'),
-      detail: incident.detail ? String(incident.detail).slice(0, 500) : null,
+      // Reports and Claude's findings are read in full; problems stay short.
+      detail: incident.detail ? String(incident.detail).slice(0, cat === 'report' ? 4000 : 500) : null,
       color: COLOR[severity],
       osUser: null,
     };
@@ -124,7 +127,7 @@ export class AlertFeed {
     if (!p.notify) return false;
     if (p.paused && (p.pausedUntil === null || this.now() < p.pausedUntil)) return false;
     if (p.muted.includes(event.cat)) return false;
-    return (SEV_RANK[event.severity] ?? 0) >= (SEV_RANK[p.minSeverity] ?? 1) || event.type === 'test';
+    return (SEV_RANK[event.severity] ?? 0) >= (SEV_RANK[p.minSeverity] ?? 1) || event.type === 'test' || event.type === 'report';
   }
 
   list({ limit = 100, before = null, severity = null, cat = null } = {}) {
@@ -264,7 +267,7 @@ export function createPanelApi(deps) {
       role: 'Owner',
       scope: 'full',
       runAs: term ? 'root' : 'claude',
-      can: { servicesView: true, servicesControl: true, uptimeView: false, power: false, terminal: term, claude: Boolean(deps.claude) },
+      can: { servicesView: true, servicesControl: true, uptimeView: Boolean(deps.uptime), power: false, terminal: term, claude: Boolean(deps.claude) },
       why: {
         terminal: term ? null : deps.terminalHint ?? 'The terminal is off. For a shell, use the Unraid web terminal.',
         claude: deps.claude ? null : 'Claude in Wraith is not ready yet. Use the Claude app or Discord for now.',
@@ -304,8 +307,8 @@ export function createPanelApi(deps) {
       prefs: deps.alerts.prefs(),
       severities: ['info', 'warn', 'error'],
       categories: CATEGORIES.map((c) => ({ ...c, visible: true, logging: true })),
-      can: { settings: false, autoheal: { view: false, control: false }, uptime: { view: false, control: false }, exposure: false, clearFeed: true },
-      rules: { autoheal: [], uptime: [] },
+      can: { settings: false, autoheal: { view: false, control: false }, uptime: { view: Boolean(deps.uptime), control: Boolean(deps.uptime) }, exposure: false, clearFeed: true },
+      rules: { autoheal: [], uptime: deps.uptime ? deps.uptime.list() : [] },
       box: null,
     };
   }
@@ -347,7 +350,7 @@ export function createPanelApi(deps) {
       return ok({ groups: [{ type: 'docker', label: 'Containers', items: rows.map(service) }] });
     }
     if (m === 'GET' && route === 'groups') return ok({ groups: [], nicks: {} });
-    if (m === 'GET' && route === 'uptime') return ok({ targets: [] });
+    if (m === 'GET' && route === 'uptime') return ok({ targets: deps.uptime ? deps.uptime.list() : [] });
     if (m === 'GET' && route === 'updates') return ok({ count: 0, security: 0 });
     if (m === 'POST' && route === 'updates/refresh') return ok({ ok: true });
     if (m === 'GET' && route === 'restart') {
@@ -440,7 +443,13 @@ export function createPanelApi(deps) {
       await deps.test(event);
       return ok({ ok: true });
     }
-    if (segs[0] === 'alerts') return err(403, 'not_allowed', 'That setting lives in the Unraid template, or by talking to the watcher.');
+    if (deps.uptime && m === 'POST' && route === 'alerts/uptime') {
+      try { return ok(await deps.uptime.upsert(json ?? {})); } catch (e) { return err(e.status ?? 400, e.code ?? 'bad_request', e.message); }
+    }
+    if (deps.uptime && m === 'DELETE' && segs[0] === 'alerts' && segs[1] === 'uptime' && segs.length === 3) {
+      try { return ok(await deps.uptime.remove(segs[2])); } catch (e) { return err(e.status ?? 400, e.code ?? 'bad_request', e.message); }
+    }
+    if (segs[0] === 'alerts') return err(403, 'not_allowed', 'That setting lives in the Unraid template, or ask Claude in the chat.');
 
     return err(404, 'not_found', 'Not available on this server.');
   }

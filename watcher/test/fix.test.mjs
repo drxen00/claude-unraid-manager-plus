@@ -114,7 +114,8 @@ test('MCP server: initialize, list, call forwarded, errors', async () => {
   assert.match(init.result.instructions, /Allow and Deny/);
   const list = await handleMessage({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
   assert.deepEqual(list.result.tools.map((t) => t.name), Object.keys(FIX_TOOLS));
-  assert.ok(list.result.tools.every((t) => t.inputSchema.required.includes('reason')));
+  // Every change needs a reason for the owner; reading (watch_status) does not.
+  assert.ok(list.result.tools.filter((t) => !FIX_TOOLS[t.name].noAsk).every((t) => t.inputSchema.required.includes('reason')));
   let seen;
   const call = await handleMessage(
     { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'container_restart', arguments: { name: 'plex', reason: 'r' } } },
