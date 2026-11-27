@@ -843,7 +843,7 @@ if [ "$(cat "$cfg")" = "$(printf 'port=8989\nlog=debug')" ]; then pass "host-fix
 if [ "$(stat -c %a "$cfg")" = 640 ]; then pass "host-fix: write keeps the mode"; else fail "host-fix write mode: $(stat -c %a "$cfg")"; fi
 bak=$(find "$HF/mnt/user/appdata/sonarr/config" -name 'config.ini.claude-bak-*' | head -1)
 if [ -n "$bak" ] && [ "$(cat "$bak")" = "$(printf 'port=8989\nlog=info')" ]; then pass "host-fix: write keeps a backup"; else fail "host-fix write backup: '$bak'"; fi
-if [ -z "$(find "$HF/mnt/user/appdata/sonarr/config" -name '*.claude-tmp.*')" ]; then pass "host-fix: no temp file left"; else fail "host-fix: temp file left"; fi
+if [ -z "$(find "$HF/mnt/user/appdata/sonarr/config" -name '*.claude-new-*' -o -name '*.claude-tmp.*')" ]; then pass "host-fix: no temp file left"; else fail "host-fix: temp file left"; fi
 # The same sha again: the file changed since, so it is refused.
 set +e
 printf 'x\n' | env -u SSH_ORIGINAL_COMMAND HOST_FIX_TEST_ROOT="$HF" bash "$ROOT/host-fix" write /mnt/user/appdata/sonarr/config/config.ini "$sha" >/dev/null 2>&1
@@ -858,7 +858,7 @@ st=$?
 set -e
 if [ "$st" -eq 65 ] && printf '%s' "$out" | grep -q 'no Unraid template'; then pass "host-fix: test root ignored under ssh"; else fail "host-fix under ssh ($st): $out"; fi
 out=$(SSH_ORIGINAL_COMMAND='version' bash "$ROOT/host-fix" rm -rf /)
-if [ "$out" = 2 ]; then pass "host-fix: arguments ignored under ssh"; else fail "host-fix arguments under ssh: '$out'"; fi
+if [ "$out" = 3 ]; then pass "host-fix: arguments ignored under ssh"; else fail "host-fix arguments under ssh: '$out'"; fi
 # A real chown in the fixture (as this user, to its own uid): it changes the
 # folder and does not follow the link inside it.
 me="$(id -u):$(id -g)"

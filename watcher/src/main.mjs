@@ -7,7 +7,6 @@
 // container's entrypoint as root, so Claude's user cannot read its Discord
 // token or its state; Claude itself runs as that user.
 import { randomBytes } from 'node:crypto';
-import * as fsp from 'node:fs/promises';
 import { access, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { ActionBook, CATALOG, describeOffer, validateSuggestions } from './actions.mjs';
@@ -15,7 +14,7 @@ import { askClaude, chatPrompt, fixPrompt, incidentPrompt, morningPrompt } from 
 import { collect, parseDockerPs } from './checks.mjs';
 import { loadConfig } from './config.mjs';
 import { approvalRow, startDiscord } from './discord.mjs';
-import { APPROVAL_MS, FixBroker, HOST_FIX_FILES, serveFixSocket } from './fix.mjs';
+import { APPROVAL_MS, FixBroker, HOST_FIX_FILES, HOST_FIX_LATEST, serveFixSocket } from './fix.mjs';
 import { diff, emptyState, failureFindings, openIncidents } from './incidents.mjs';
 import {
   addAlert, addMute, addNote, describeCondition, describeRule, emptyPrefs, listRules, matches,
@@ -29,6 +28,7 @@ import { SysSampler } from './sysinfo.mjs';
 import { serveAdminSocket, startWraith } from './wraith.mjs';
 import { HostTerminal } from './terminal.mjs';
 import { ClaudeChats } from './claudechat.mjs';
+import { ownedFs } from './ownedfs.mjs';
 import { UptimeMonitor } from './uptime.mjs';
 import { investigatePrompt } from './claude.mjs';
 import { spawn } from 'node:child_process';
@@ -466,10 +466,12 @@ async function main() {
   async function askOwner({ what, detail, reason, source, origin }) {
     // Wraith first: the chat this came from, else the Approvals list in the
     // Claude channel (claudechat.mjs); Discord only without Wraith.
-    if (chats && (chats.chatFor(origin) || wraithLink)) {
-      const summary = `${what.replace(/**/g, '')}${source ? ` (${source})` : ''}${detail ? `
-${detail.replace(/**/g, '')}` : ''}${reason ? `
-Why: ${reason}` : ''}`;
+    const inChat = Boolean(chats?.chatFor(origin));
+    if (chats && (inChat || wraithLink)) {
+      // From a Wraith chat, the policy's label ("from your Claude app
+      // session") would be wrong: say where it really comes from.
+      const from = inChat ? 'asked in this chat' : source;
+      const summary = `${what.replace(/\*\*/g, '')}${from ? ` (${from})` : ''}${detail ? `\n${detail.replace(/\*\*/g, '')}` : ''}${reason ? `\nWhy: ${reason}` : ''}`;
       const asked = chats.ask(origin, { tool: 'Claude wants to change something', summary, inbox: Boolean(wraithLink) });
       const d = asked && (await asked);
       if (d) return d;
@@ -518,6 +520,8 @@ Why: ${reason}` : ''}`;
     const ver = Number(v.stdout.trim());
     if (v.code === 0 && ver < HOST_FIX_FILES) {
       console.log(`unraid-watch: host fixes over SSH to ${cfg.sshHost} (host-fix ${ver}); commands in containers and config edits need the newer host-fix: docker exec -it claude-unraid-manager host-fix-setup, step 1`);
+    } else if (v.code === 0 && ver < HOST_FIX_LATEST) {
+      console.log(`unraid-watch: host fixes over SSH to ${cfg.sshHost} (host-fix ${ver}); a safer host-fix is available, please copy it: docker exec -it claude-unraid-manager host-fix-setup, step 1`);
     } else if (v.code === 0) console.log(`unraid-watch: host fixes over SSH to ${cfg.sshHost} (host-fix ${v.stdout.trim()})`);
     else console.log(`unraid-watch: host fixes not working yet (${(v.stderr || v.stdout).trim().slice(0, 200) || `exit ${v.code}`}); updates and permission fixes need host-fix-setup`);
   }
@@ -625,11 +629,19 @@ Why: ${reason}` : ''}`;
 
     // The Claude channel: Claude Code as Claude's user, asking in Wraith.
     let claudeVersion;
+    const claudeUid = Number((await run('id', ['-u', cfg.claudeUser])).stdout.trim()) || 99;
     chats = new ClaudeChats({
       home: cfg.claudeHome,
       workspace: '/workspace',
-      fs: fsp,
-      uid: Number((await run('id', ['-u', cfg.claudeUser])).stdout.trim()) || 99,
+      // Claude's user owns the transcripts' folders: only its own regular
+      // files are read or deleted there (ownedfs.mjs).
+      fs: ownedFs(claudeUid),
+      // Written by Claude's user, so a link in its folders gains nothing.
+      saveUpload: async (dir, path, raw) => {
+        const r = await asClaude(cfg, ['sh', '-c', 'umask 022 && mkdir -p -- "$1" && cat > "$2"', 'sh', dir, path], { input: raw, timeoutMs: 30_000 });
+        if (r.code !== 0) throw Object.assign(new Error(`Could not save the file: ${(r.stderr || `exit ${r.code}`).trim().slice(0, 200)}`), { status: 500, code: 'upload_failed' });
+      },
+      uid: claudeUid,
       gid: cfg.claudeGid,
       spawnClaude: (args, { cwd, chatId }) => spawn('runuser', [
         '-u', cfg.claudeUser, '--',
@@ -660,7 +672,7 @@ Why: ${reason}` : ''}`;
       claudeVersion: async () => {
         if (claudeVersion === undefined) {
           const v = await asClaude(cfg, ['claude', '--version'], { timeoutMs: 20_000 });
-          claudeVersion = v.code === 0 ? v.stdout.trim().split(/s+/)[0] || null : null;
+          claudeVersion = v.code === 0 ? v.stdout.trim().split(/\s+/)[0] || null : null;
         }
         return claudeVersion;
       },

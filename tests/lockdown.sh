@@ -133,6 +133,27 @@ log=$(docker logs "$C" 2>&1)
 if printf '%s' "$log" | grep -q 'Claude as user claude, not root'; then pass "start log names the user"; else fail "start log: $(printf '%s' "$log" | tail -5)"; fi
 if printf '%s' "$log" | grep -q "$SECRET"; then fail "key printed in the start log"; else pass "key not in the start log"; fi
 
+echo "lockdown: links planted by Claude's user"
+# Claude's user owns /workspace and its home, so it can put a link where root
+# later writes or chowns. A restart re-runs everything root does at start;
+# nothing it does may follow those links.
+stats='stat -c "%n %U:%G %a" /etc /etc/passwd /etc/claude-code /etc/claude-code/managed-settings.json; sha256sum /etc/passwd /etc/claude-code/managed-settings.json'
+before=$(in_c "$stats")
+as_claude 'rm -rf /workspace/watch && ln -s /etc /workspace/watch
+  rm -f /workspace/CLAUDE.md && ln -s /etc/claude-code/managed-settings.json /workspace/CLAUDE.md
+  mv /home/claude/.ssh /home/claude/.ssh.real && ln -s /etc/claude-code /home/claude/.ssh' 2>&1 | head -5
+starts=$(docker logs "$C" 2>&1 | grep -c 'Claude Unraid Manager is running')
+docker restart "$C" >/dev/null
+for _ in $(seq 60); do [ "$(docker logs "$C" 2>&1 | grep -c 'Claude Unraid Manager is running')" -gt "$starts" ] && break; sleep 1; done
+after=$(in_c "$stats")
+if [ "$before" = "$after" ]; then pass "root followed none of the links (/etc, passwd, managed settings unchanged)"; else fail "a link was followed: before '$before' after '$after'"; fi
+if in_c 'test -f /workspace/CLAUDE.md && ! test -L /workspace/CLAUDE.md' && [ "$(in_c 'stat -c %U /workspace/CLAUDE.md')" = claude ]; then
+  pass "CLAUDE.md written anew as Claude's file, the link replaced"
+else
+  fail "CLAUDE.md after the link: $(in_c 'ls -l /workspace/CLAUDE.md')"
+fi
+as_claude 'rm -f /home/claude/.ssh && mv /home/claude/.ssh.real /home/claude/.ssh' >/dev/null 2>&1
+
 echo "lockdown: Wraith only"
 # A well-formed code for a Wraith that is not there: the watcher keeps retrying, harmlessly.
 WRAITH_SECRET="wpanel_$(printf '7%.0s' $(seq 64))"

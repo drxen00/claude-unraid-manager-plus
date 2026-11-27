@@ -23,6 +23,9 @@ export const MAX_COMMAND = 1500;
 export const MAX_EDIT_TEXT = 8000;
 // The host-fix version that has exec, read and write.
 export const HOST_FIX_FILES = 2;
+// The newest host-fix: 3 makes its file reads and writes safe against a
+// container swapping a file for a link.
+export const HOST_FIX_LATEST = 3;
 export const APPROVAL_MS = 15 * 60_000;
 export const MAX_FIXES_PER_HOUR = 10;
 // Questions to the owner, allowed or not: keeps a looping run from flooding

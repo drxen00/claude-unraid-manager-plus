@@ -3,6 +3,7 @@
 // and changes nothing itself: each call is forwarded to the watcher's socket,
 // where the owner allows or denies it in Discord. Listed in the root-owned
 // managed MCP config by the entrypoint when the Discord watcher is set up.
+import { readFileSync } from 'node:fs';
 import { createConnection } from 'node:net';
 import { createInterface } from 'node:readline';
 import { pathToFileURL } from 'node:url';
@@ -12,8 +13,33 @@ const SOCKET = process.env.UNRAID_FIX_SOCKET || '/run/unraid-watch/fix.sock';
 // Set in the managed MCP config when Wraith is on: offer the permission tool
 // the Wraith chats use (--permission-prompt-tool mcp__fix__wraith_permission).
 const WRAITH = process.env.UNRAID_WRAITH_PERM === '1';
-// The Wraith chat this Claude runs for, when Claude Code passes it down.
-const ORIGIN = process.env.WRAITH_CHAT_ID || null;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * The Wraith chat this Claude runs for. The watcher starts each chat's
+ * claude with WRAITH_CHAT_ID; Claude Code may not pass its environment on to
+ * MCP servers, so the processes above this one are asked too (a few levels,
+ * as far as Claude's user can read them). Without it, a change goes to the
+ * Approvals list instead of the chat: still asked, just elsewhere.
+ */
+export function findOrigin({ env = process.env, ppid = process.ppid, read = (p) => readFileSync(p, 'utf8') } = {}) {
+  if (UUID.test(env.WRAITH_CHAT_ID ?? '')) return env.WRAITH_CHAT_ID;
+  let pid = ppid;
+  for (let i = 0; i < 4 && pid > 1; i++) {
+    try {
+      const vars = read(`/proc/${pid}/environ`).split('\0');
+      const hit = vars.find((v) => v.startsWith('WRAITH_CHAT_ID='))?.slice('WRAITH_CHAT_ID='.length);
+      if (UUID.test(hit ?? '')) return hit;
+      // Field 4 of /proc/<pid>/stat, after the "(name)" that may hold spaces.
+      const stat = read(`/proc/${pid}/stat`);
+      pid = Number(stat.slice(stat.lastIndexOf(') ') + 2).split(' ')[1]);
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+const ORIGIN = findOrigin();
 
 export const PERMISSION_TOOL = {
   description: 'Used by Claude Code itself to ask the owner, in their Wraith chat, whether a tool may run. Not for direct use.',

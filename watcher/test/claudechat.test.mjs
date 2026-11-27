@@ -38,6 +38,7 @@ function setup({ files = { [`/home/claude/.claude/projects/-workspace/${ID}.json
   const notices = [];
   const spawned = [];
   const signals = [];
+  const uploads = [];
   let names = {};
   const chats = new ClaudeChats({
     home: '/home/claude',
@@ -57,13 +58,14 @@ function setup({ files = { [`/home/claude/.claude/projects/-workspace/${ID}.json
       return c;
     },
     signal: (child, sig) => signals.push([child, sig]),
+    saveUpload: async (dir, path, raw) => { uploads.push({ dir, path, raw }); },
     emit: (e) => events.push(e),
     notify: (e) => notices.push(e),
     names: () => names,
     saveNames: async (n) => { names = n; },
   });
   const say = (c, obj) => c.stdout.emit('data', `${JSON.stringify(obj)}\n`);
-  return { chats, events, notices, spawned, signals, say };
+  return { chats, events, notices, spawned, signals, say, uploads };
 }
 
 test('a transcript becomes the chat: user, assistant, tools with their results; meta lines skipped', () => {
@@ -210,11 +212,16 @@ test('settings restart Claude on the same chat; not while it works', async () =>
   assert.deepEqual(signals.at(-1), [spawned[1], 'SIGINT']);
 });
 
-test('uploads land in the chat folder under a safe name', async () => {
-  const { chats } = setup();
+test("uploads land in the chat folder under a safe name, written as Claude's user", async () => {
+  const { chats, uploads } = setup();
   const r = await chats.upload({ name: '../../etc/passwd', cwd: '/workspace/proj', raw: Buffer.from('x') });
-  assert.match(r.path, /^\/workspace\/proj\/\.wraith-uploads\/[a-z0-9]+-passwd$/);
+  assert.match(r.path, /^\/workspace\/proj\/\.wraith-uploads\/[a-z0-9]+-[0-9a-f]{6}-passwd$/);
+  assert.deepEqual(uploads, [{ dir: '/workspace/proj/.wraith-uploads', path: r.path, raw: Buffer.from('x') }]);
   await assert.rejects(chats.upload({ name: 'a', cwd: '/root', raw: Buffer.from('x') }), /Chats run in/);
+  // Not into the watcher's own folder, and no chat runs there either.
+  await assert.rejects(chats.upload({ name: 'a', cwd: '/workspace/.unraid-watch', raw: Buffer.from('x') }), /watcher's own folder/);
+  await assert.rejects(chats.open({ cwd: '/workspace/.unraid-watch/x' }), /watcher's own folder/);
+  assert.equal(uploads.length, 1);
 });
 
 test('the permission tool: listed only with Wraith on, answers as one text block, carries the chat', async () => {

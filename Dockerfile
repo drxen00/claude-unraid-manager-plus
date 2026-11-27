@@ -19,7 +19,7 @@ WORKDIR /watcher
 COPY watcher/package.json watcher/package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 COPY watcher/src ./src
-RUN node --check src/main.mjs && node --check src/fix-mcp.mjs && node --check src/link-cli.mjs && node --check src/claudechat.mjs && node --check src/terminal.mjs && node --check src/uptime.mjs && cp /usr/local/bin/node /watcher/node
+RUN node --check src/main.mjs && node --check src/fix-mcp.mjs && node --check src/link-cli.mjs && node --check src/claudechat.mjs && node --check src/terminal.mjs && node --check src/uptime.mjs && node --check src/ownedfs.mjs && cp /usr/local/bin/node /watcher/node
 
 # ── runtime ──────────────────────────────────────────────────────────────────
 # Claude Code runs natively. Node.js is only shipped for the watcher, outside

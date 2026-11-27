@@ -32,8 +32,9 @@ done
 [ -f "$CLAUDE_HOME/.tmux.conf" ] || as_claude cp /usr/local/share/claude-unraid-manager/tmux.conf "$CLAUDE_HOME/.tmux.conf"
 as_claude mkdir -p "$CLAUDE_HOME/.claude"
 
-# Fix SSH key permissions (bind-mount may loosen them)
-if [ -d "$CLAUDE_HOME/.ssh" ]; then
+# Fix SSH key permissions (bind-mount may loosen them). Not through a link:
+# Claude's user owns its home, and root's chmod would follow one.
+if [ -d "$CLAUDE_HOME/.ssh" ] && [ ! -L "$CLAUDE_HOME/.ssh" ]; then
   chmod 700 "$CLAUDE_HOME/.ssh" 2>/dev/null || true
   find "$CLAUDE_HOME/.ssh" -type f ! -name '*.pub' ! -name 'known_hosts*' -exec chmod 600 {} + 2>/dev/null || true
   chown -R "$CLAUDE_USER":"$(id -g "$CLAUDE_USER")" "$CLAUDE_HOME/.ssh" 2>/dev/null || true
@@ -154,10 +155,16 @@ if [ "$DOCKER_MODE" != full ]; then
 fi
 
 # ── Generate / refresh CLAUDE.md ─────────────────────────────────────────────
-# As root: it reads the flash drive, which only root may read. The result
-# belongs to Claude's user, so the Custom section stays editable.
-/usr/local/bin/generate-claude-md.sh
-chown "$CLAUDE_USER":"$(id -g "$CLAUDE_USER")" /workspace/CLAUDE.md
+# Generated as root (it reads the flash drive, which only root may read), in
+# a root-only folder; the old file is read and the new one written by
+# Claude's user. /workspace is Claude's, so CLAUDE.md there could be a link
+# to anything by now (/etc/passwd, the managed settings): root never opens,
+# writes or chowns it by that name.
+md_tmp=$(mktemp -d)
+as_claude cat /workspace/CLAUDE.md > "$md_tmp/CLAUDE.md" 2>/dev/null || rm -f "$md_tmp/CLAUDE.md"
+CLAUDE_MD_DEST="$md_tmp/CLAUDE.md" /usr/local/bin/generate-claude-md.sh
+as_claude sh -c 'cat > /workspace/.CLAUDE.md.new && mv -f /workspace/.CLAUDE.md.new /workspace/CLAUDE.md' < "$md_tmp/CLAUDE.md"
+rm -rf "$md_tmp"
 
 # ── Build the claude launch arguments ────────────────────────────────────────
 ARGS=()
@@ -196,8 +203,8 @@ if [ -n "${DISCORD_BOT_TOKEN:-}" ] || [ "$WRAITH_ON" = true ]; then
   if [ -n "${DISCORD_BOT_TOKEN:-}" ] && [ "$DISCORD_OK" != true ]; then
     echo "Discord: bot token is set, but 'Discord user ID' is empty or not a number. Watcher not started."
   else
-    mkdir -p /workspace/watch
-    chown "$CLAUDE_USER":"$(id -g "$CLAUDE_USER")" /workspace/watch
+    # By Claude's user: root's mkdir or chown would follow a link there.
+    as_claude mkdir -p /workspace/watch
     # The watcher keeps its state (rules, audit log, host-fix key) in
     # /workspace/.unraid-watch, root only. Claude's user owns /workspace and
     # could swap that folder at any time, so the watcher checks and pins it

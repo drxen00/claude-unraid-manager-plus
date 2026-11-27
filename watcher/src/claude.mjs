@@ -5,7 +5,6 @@
 // (read-only Docker, the read-only host checks, the read-only Unraid API, and
 // the fix tools). Every fix tool call waits for the owner's Allow in Discord
 // (fix.mjs); reports and alerts are told not to use them at all.
-import { mkdir, chown } from 'node:fs/promises';
 import { describeRule } from './rules.mjs';
 
 const RULES = `
@@ -237,14 +236,11 @@ export function parseReply(text) {
 // mode: 'report' (reports and alerts), 'chat' or 'fix'. Chat and fix runs
 // may wait for the owner's taps, so they get more time and turns.
 export async function askClaude(cfg, prompt, { asClaude, mode = 'report' }) {
-  try {
-    await mkdir(cfg.claudeCwd, { recursive: true });
-    const uid = Number(process.env.CLAUDE_UID ?? 99);
-    const gid = Number(process.env.CLAUDE_GID ?? 100);
-    await chown(cfg.claudeCwd, uid, gid).catch(() => {});
-  } catch {
-    // The run below reports the problem if the directory is unusable.
-  }
+  // Made by Claude's user, never by root: the folder is in /workspace, which
+  // Claude's user owns, so it could be a link to /etc by now, and a root
+  // mkdir or chown would follow it. The run below reports a folder that is
+  // unusable.
+  await asClaude(cfg, ['mkdir', '-p', '--', cfg.claudeCwd], { timeoutMs: 15_000 });
   const long = mode !== 'report';
   const timeoutMs = long ? cfg.fixTimeoutMs : cfg.claudeTimeoutMs;
   const r = await asClaude(cfg, ['claude', '-p', '--output-format', 'json', '--max-turns', long ? '60' : '30'], {

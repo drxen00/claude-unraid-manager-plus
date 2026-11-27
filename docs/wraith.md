@@ -137,8 +137,8 @@ this server, the same as the Claude app session:
   your phone gets a push. Nothing runs until you tap.
 - **Fixes.** Restarting, updating, running a command inside a container or
   editing a config file are asked the same way, right in the chat, with the
-  exact command or change shown. Fix requests from the Claude app, or from
-  Discord, still go to Discord.
+  exact command or change shown. Requests from anywhere else (the Claude
+  app) go to the Approvals list, never into a chat that did not ask.
 - **Model, effort and mode** can be changed per chat. Claude restarts on the
   same chat to switch. "Bypass permissions" is not available.
 - At most 3 chats run at once. **End chat** stops one; the transcript stays.

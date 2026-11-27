@@ -107,7 +107,9 @@ export class ClaudeChats {
   /**
    * deps: {
    *   home: Claude's home ('/home/claude'), workspace: '/workspace',
-   *   fs: { readFile, readdir, stat, unlink, mkdir, writeFile, chown },
+   *   fs: { readFile, readdir, stat, unlink }: ownedfs.mjs, so a link or a
+   *       root file planted among the transcripts is never read or deleted,
+   *   saveUpload(dir, path, raw): writes the file as Claude's user,
    *   spawnClaude(args, { cwd, chatId }) → child (stdin, stdout, stderr, pid, on('close')),
    *   signal(child, sig),
    *   emit(event), notify(event),   // to the linked owner: live events / phone
@@ -247,11 +249,13 @@ export class ClaudeChats {
     return { dirs, home: ws };
   }
 
-  /** Inside the workspace, or the workspace itself. */
+  /** Inside the workspace, or the workspace itself; never the watcher's own folder. */
   #cwd(raw) {
     const ws = this.d.workspace;
     const p = resolvePath(ws, String(raw || ws));
     if (p !== ws && !p.startsWith(`${ws}/`)) throw Object.assign(new Error(`Chats run in ${ws} or a folder in it.`), { status: 400, code: 'bad_cwd' });
+    const own = join(ws, '.unraid-watch');
+    if (p === own || p.startsWith(`${own}/`)) throw Object.assign(new Error("That is the watcher's own folder."), { status: 400, code: 'bad_cwd' });
     return p;
   }
 
@@ -479,9 +483,15 @@ export class ClaudeChats {
     return c;
   }
 
-  /** The chat a question belongs to: the one named, else the only one working. */
-  chatFor(origin) {
+  /**
+   * The chat a question belongs to: the one named. guess: else the only one
+   * working, for the permission prompts, which only Wraith chats send.
+   * Changes Claude asks for from elsewhere (the Claude app) must not land in
+   * a Wraith chat as if that chat had asked.
+   */
+  chatFor(origin, { guess = false } = {}) {
     if (origin && this.live.has(origin)) return this.live.get(origin);
+    if (!guess) return null;
     const working = [...this.live.values()].filter((c) => !c.virtual && (c.status === 'working' || c.status === 'waiting'));
     return working.length === 1 ? working[0] : null;
   }
@@ -490,8 +500,8 @@ export class ClaudeChats {
    * Ask the owner in the chat. Resolves 'allow' | 'deny' | 'timeout', or
    * null when there is no chat to ask in.
    */
-  ask(origin, { tool, summary, inbox = false }) {
-    const c = this.chatFor(origin) ?? (inbox ? this.inbox() : null);
+  ask(origin, { tool, summary, inbox = false, guess = false }) {
+    const c = this.chatFor(origin, { guess }) ?? (inbox ? this.inbox() : null);
     if (!c) return null;
     if (c.virtual) {
       // The list keeps what was asked, so it can be read later.
@@ -535,7 +545,7 @@ export class ClaudeChats {
   /** --permission-prompt-tool: Claude wants to use a tool its rules do not allow outright. */
   async permission(origin, { tool_name: toolName, input }) {
     const name = String(toolName ?? 'a tool');
-    const decision = await this.ask(origin, { tool: name, summary: summarizeTool(name, input) });
+    const decision = await this.ask(origin, { tool: name, summary: summarizeTool(name, input), guess: true });
     if (decision === 'allow') return { behavior: 'allow', updatedInput: input && typeof input === 'object' ? input : {} };
     const why = decision === null ? 'There is no Wraith chat to ask the owner in.' : decision === 'timeout' ? 'The owner did not answer within 15 minutes.' : 'The owner said no.';
     return { behavior: 'deny', message: why };
@@ -544,11 +554,9 @@ export class ClaudeChats {
   async upload({ name, cwd, raw }) {
     const dir = join(this.#cwd(cwd), '.wraith-uploads');
     const safe = basename(String(name ?? 'file')).replace(/[^A-Za-z0-9._ -]/g, '_').replace(/^\.+/, '').slice(0, 120) || 'file';
-    const path = join(dir, `${Date.now().toString(36)}-${safe}`);
-    await this.d.fs.mkdir(dir, { recursive: true });
-    await this.d.fs.chown(dir, this.d.uid, this.d.gid).catch(() => {});
-    await this.d.fs.writeFile(path, raw ?? Buffer.alloc(0), { mode: 0o644 });
-    await this.d.fs.chown(path, this.d.uid, this.d.gid).catch(() => {});
+    const path = join(dir, `${Date.now().toString(36)}-${randomBytes(3).toString('hex')}-${safe}`);
+    // As Claude's user: the folder is Claude's, and could be a link by now.
+    await this.d.saveUpload(dir, path, raw ?? Buffer.alloc(0));
     return { path };
   }
 }

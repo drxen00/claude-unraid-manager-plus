@@ -10,7 +10,7 @@
 // go through the same ActionBook as the Discord buttons (state re-checked,
 // at most a few an hour, audited); and every request but `link` needs the
 // one Wraith account that was linked with a code from this server.
-import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { randomBytes, randomInt, timingSafeEqual } from 'node:crypto';
 import { OWN_CONTAINERS } from './checks.mjs';
 
 const NAME = /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/;
@@ -24,8 +24,8 @@ export const LINK_CODE_MS = 10 * 60_000;
 const LINK_TRIES = 5;
 
 export function newLinkCode() {
-  const b = randomBytes(8);
-  const c = [...b].map((x) => ALPHABET[x % ALPHABET.length]).join('');
+  // randomInt: every letter equally likely (a byte % 31 is not).
+  const c = Array.from({ length: 8 }, () => ALPHABET[randomInt(ALPHABET.length)]).join('');
   return `${c.slice(0, 4)}-${c.slice(4)}`;
 }
 
@@ -40,6 +40,11 @@ export class LinkCodes {
     const code = newLinkCode();
     this.current = { code, expires: this.now() + LINK_CODE_MS, tries: 0 };
     return { code, expires: this.current.expires };
+  }
+
+  /** Is a code out there to be typed in? */
+  waiting() {
+    return Boolean(this.current) && this.now() <= this.current.expires;
   }
 
   /** True once, for the right code; a wrong guess counts against it. */
@@ -323,6 +328,9 @@ export function createPanelApi(deps) {
 
     // The one request a stranger may make: link with a code from this server.
     if (m === 'POST' && route === 'link') {
+      // Anyone in the space can send this: with no code out, there is
+      // nothing to guess, and nothing goes into the audit log either.
+      if (!deps.codes.waiting()) return err(400, 'bad_code', 'That code did not work. Get a new one on the server and try again.');
       if (!deps.codes.redeem(json?.code)) {
         await deps.audit({ who: `wraith:${user}`, action: 'wraith.link', result: 'wrong code' });
         return err(400, 'bad_code', 'That code did not work. Get a new one on the server and try again.');
