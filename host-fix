@@ -40,7 +40,7 @@
 set -u -f
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export LC_ALL=C
-VERSION=2
+VERSION=3
 # Caps on what may come on stdin.
 MAX_CMD=8192
 MAX_FILE=1048576
@@ -115,6 +115,16 @@ below_appdata() {
   if [ -n "$(find "$ROOT$appdir" -maxdepth 3 -name "$MARKER" -print -quit 2>/dev/null)" ]; then
     refuse "this tool's own data is not changed from here"
   fi
+}
+
+# opened_ok <fd>: the file open on <fd> is the regular file below_appdata
+# checked. The container that owns the folder can swap a file for a link at
+# any moment; checking the open file, not its name, means a swap after the
+# check is caught instead of followed.
+opened_ok() {
+  local p
+  p=$(readlink "/proc/$$/fd/$1") || return 1
+  [ "${p#"$ROOT"}" = "$real" ] && [ -f "/proc/$$/fd/$1" ]
 }
 
 [ ${#request} -le 512 ] || refuse "request too long"
@@ -195,29 +205,47 @@ case "${w[0]}" in
   read)
     [ "$n" -eq 2 ] || refuse "read <file below appdata>"
     below_appdata "$a1" true
-    [ "$(stat -c %s -- "$ROOT$real")" -le $MAX_FILE ] || refuse "'$real' is larger than 1 MB"
     if $print; then echo "cat $real"; exit 0; fi
-    cat -- "$ROOT$real"
+    exec 3< "$ROOT$real" || refuse "cannot open '$real'"
+    opened_ok 3 || refuse "'$a1' changed while it was being read"
+    [ "$(stat -L -c %s "/proc/$$/fd/3")" -le $MAX_FILE ] || refuse "'$real' is larger than 1 MB"
+    cat <&3
     exit $? ;;
 
   write)
     [ "$n" -eq 3 ] || refuse "write <file below appdata> <sha256 of its current content>"
     [[ ${w[2]} =~ ^[0-9a-f]{64}$ ]] || refuse "the current content's sha256 is needed"
     below_appdata "$a1" true
-    have=$(sha256sum -- "$ROOT$real" | cut -c1-64)
+    # Everything below goes through open files, never a name the container
+    # could have swapped for a link to a host file (see opened_ok):
+    # - the old file is opened and checked once (fd 3), then read through
+    #   /proc/$$/fd/3, which always means that same file;
+    # - the backup and the new file are created with noclobber (O_EXCL: an
+    #   existing name or a link is refused, not followed), and get their
+    #   owner and mode through their own open handle.
+    exec 3< "$ROOT$real" || refuse "cannot open '$real'"
+    opened_ok 3 || refuse "'$a1' changed while it was being read"
+    old="/proc/$$/fd/3"
+    have=$(sha256sum < "$old" | cut -c1-64)
     [ "$have" = "${w[2]}" ] || refuse "'$real' changed since it was read; read it again"
     if $print; then echo "write $real"; exit 0; fi
-    tmp=$(mktemp -- "$ROOT$real.claude-tmp.XXXXXX") || { echo "host-fix: cannot write next to $real" >&2; exit 73; }
-    head -c $((MAX_FILE + 1)) > "$tmp"
-    if [ "$(stat -c %s -- "$tmp")" -gt $MAX_FILE ]; then rm -f -- "$tmp"; refuse "new content larger than 1 MB"; fi
-    bak="$real.claude-bak-$(date +%Y%m%d-%H%M%S)"
-    # The backup first; the new file gets the old one's owner and mode, then
-    # replaces it in one step.
-    if ! cp -p -- "$ROOT$real" "$ROOT$bak"; then rm -f -- "$tmp"; echo "host-fix: could not make the backup; nothing changed" >&2; exit 73; fi
-    chown --reference="$ROOT$real" -- "$tmp" && chmod --reference="$ROOT$real" -- "$tmp" \
-      && mv -f -- "$tmp" "$ROOT$real"
+    stamp="$(date +%Y%m%d-%H%M%S)-$$"
+    bak="$real.claude-bak-$stamp"
+    if ! ( set -C; exec 4> "$ROOT$bak" || exit 1
+           cat "$old" >&4 && chown --reference="$old" "/proc/$BASHPID/fd/4" && chmod --reference="$old" "/proc/$BASHPID/fd/4" ) 2>/dev/null; then
+      echo "host-fix: could not make the backup $bak; nothing changed" >&2
+      exit 73
+    fi
+    tmp="$real.claude-new-$stamp"
+    ( set -C; exec 5> "$ROOT$tmp" || exit 73
+      head -c $((MAX_FILE + 1)) >&5
+      [ "$(stat -L -c %s "/proc/$BASHPID/fd/5")" -le $MAX_FILE ] || exit 66
+      chown --reference="$old" "/proc/$BASHPID/fd/5" && chmod --reference="$old" "/proc/$BASHPID/fd/5" ) 2>/dev/null
     rc=$?
-    [ "$rc" -eq 0 ] || rm -f -- "$tmp"
+    if [ "$rc" -eq 66 ]; then rm -f -- "$ROOT$tmp"; refuse "new content larger than 1 MB"; fi
+    # mv renames the name itself and never follows a link; -T: never into a folder.
+    if [ "$rc" -eq 0 ]; then mv -f -T -- "$ROOT$tmp" "$ROOT$real"; rc=$?; fi
+    [ "$rc" -eq 0 ] || rm -f -- "$ROOT$tmp"
     echo "write finished with exit code $rc"
     echo "backup: $bak"
     exit "$rc" ;;

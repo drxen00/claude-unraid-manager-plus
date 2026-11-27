@@ -106,7 +106,7 @@ docker exec -it claude-unraid-manager host-fix-setup
 It prints the commands to copy the script to the USB stick, read it, and
 allow the key. "Unraid SSH host" must be set in the template (it already is
 if the read-only checks work). Restart the container; the log then says
-`unraid-watch: host fixes over SSH to … (host-fix 2)`. If it says host-fix 1, repeat step 1 of host-fix-setup (copy the script) to get commands in containers and config edits.
+`unraid-watch: host fixes over SSH to … (host-fix 3)`. If it says an older number, repeat step 1 of host-fix-setup (copy the script): host-fix 2 added commands in containers and config edits, host-fix 3 makes those file edits safe against a container swapping a file for a link.
 
 ## What it can and cannot do
 

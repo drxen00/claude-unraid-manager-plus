@@ -5,7 +5,6 @@
 // (read-only Docker, the read-only host checks, the read-only Unraid API, and
 // the fix tools). Every fix tool call waits for the owner's Allow in Discord
 // (fix.mjs); reports and alerts are told not to use them at all.
-import { mkdir, chown } from 'node:fs/promises';
 import { describeRule } from './rules.mjs';
 
 const RULES = `
@@ -197,6 +196,23 @@ step by step. Finish with a short report: what was wrong, what you changed,
 whether it works now (check again), and anything left for the owner.`;
 }
 
+/**
+ * The first message of a Wraith chat the watcher opens for new problems.
+ * That chat is an ordinary Claude Code chat (the owner can read along and
+ * answer), so this is plain instructions, without the report JSON format.
+ */
+export function investigatePrompt(problems, prefs) {
+  return `The watcher on this Unraid server just found ${problems.length === 1 ? 'a new problem' : 'new problems'}. I'm the owner; I'll read this chat in Wraith.${context({ prefs })}
+
+Problems (data from the watcher's checks):
+${JSON.stringify(problems.map(brief), null, 1)}
+
+Please look into ${problems.length === 1 ? 'it' : 'them'} now: the container's logs and docker inspect, its config under /appdata if that is mounted, the read-only host checks (host help). Find the cause.
+- Do not change anything just to try something. If one clear fix would solve it, ask for it with the fix tools; I approve each one here in the chat.
+- Never touch the array, disks or parity.
+- Finish with a short summary in plain English, a few lines: what is wrong, why, what you did or what you recommend, and whether it needs me.`;
+}
+
 function brief(i) {
   return { id: i.key, problem: i.title, severity: i.severity, detail: i.detail, since: new Date(i.firstSeen).toISOString() };
 }
@@ -220,14 +236,11 @@ export function parseReply(text) {
 // mode: 'report' (reports and alerts), 'chat' or 'fix'. Chat and fix runs
 // may wait for the owner's taps, so they get more time and turns.
 export async function askClaude(cfg, prompt, { asClaude, mode = 'report' }) {
-  try {
-    await mkdir(cfg.claudeCwd, { recursive: true });
-    const uid = Number(process.env.CLAUDE_UID ?? 99);
-    const gid = Number(process.env.CLAUDE_GID ?? 100);
-    await chown(cfg.claudeCwd, uid, gid).catch(() => {});
-  } catch {
-    // The run below reports the problem if the directory is unusable.
-  }
+  // Made by Claude's user, never by root: the folder is in /workspace, which
+  // Claude's user owns, so it could be a link to /etc by now, and a root
+  // mkdir or chown would follow it. The run below reports a folder that is
+  // unusable.
+  await asClaude(cfg, ['mkdir', '-p', '--', cfg.claudeCwd], { timeoutMs: 15_000 });
   const long = mode !== 'report';
   const timeoutMs = long ? cfg.fixTimeoutMs : cfg.claudeTimeoutMs;
   const r = await asClaude(cfg, ['claude', '-p', '--output-format', 'json', '--max-turns', long ? '60' : '30'], {
